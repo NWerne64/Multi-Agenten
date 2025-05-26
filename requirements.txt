@@ -1,0 +1,4 @@
+mesa
+pygame
+numpy
+matplotlib
