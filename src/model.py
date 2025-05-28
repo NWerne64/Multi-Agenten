@@ -1,15 +1,15 @@
 # src/model.py
 import mesa
 import numpy as np
-from src.config import (  # Importiere Konstanten aus config.py
+from src.config import (
     GRID_WIDTH, GRID_HEIGHT, NUM_AGENTS,
     NUM_WOOD_PATCHES, NUM_STONE_PATCHES,
     MIN_CLUSTER_SIZE, MAX_CLUSTER_SIZE,
     BASE_SIZE,
     BLACKBOARD_SIZE_X, BLACKBOARD_SIZE_Y,
-    # Hier müssen alle verwendeten Zellzustände importiert werden:
     UNKNOWN, EMPTY_EXPLORED, WOOD_SEEN, STONE_SEEN, BASE_KNOWN, RESOURCE_COLLECTED_BY_ME,
-    INITIAL_EXPLORATION_ANCHORS
+    INITIAL_EXPLORATION_ANCHORS,
+    RESOURCE_GOALS
 )
 from src.agent import ResourceCollectorAgent
 
@@ -17,6 +17,7 @@ from src.agent import ResourceCollectorAgent
 class AoELiteModel(mesa.Model):
     def __init__(self, width=GRID_WIDTH, height=GRID_HEIGHT, num_agents=NUM_AGENTS):
         super().__init__()
+        self.current_step = 0
         self.grid = mesa.space.MultiGrid(width, height, torus=True)
 
         self.base_coords_list = []
@@ -33,58 +34,65 @@ class AoELiteModel(mesa.Model):
 
         self.base_resources_collected = {'wood': 0, 'stone': 0}
         self.blackboard_map = np.full((width, height), UNKNOWN, dtype=int)
+        self.resource_claims = {}
 
         self.exploration_anchor_points = []
         for rel_x, rel_y in INITIAL_EXPLORATION_ANCHORS:
-            abs_x = int(self.grid.width * rel_x)
+            abs_x = int(self.grid.width * rel_x);
             abs_y = int(self.grid.height * rel_y)
-            abs_x = max(0, min(abs_x, self.grid.width - 1))
+            abs_x = max(0, min(abs_x, self.grid.width - 1));
             abs_y = max(0, min(abs_y, self.grid.height - 1))
             self.exploration_anchor_points.append((abs_x, abs_y))
 
         for i in range(num_agents):
-            initial_anchor = None
+            initial_anchor = None;
             spawn_pos = None
             if i < len(self.base_coords_list) and i < len(self.exploration_anchor_points):
-                spawn_pos = self.base_coords_list[i]
+                spawn_pos = self.base_coords_list[i];
                 initial_anchor = self.exploration_anchor_points[i]
             else:
-                print(f"Warnung: Agent {i} hat keinen spezifischen Startplatz/Ankerpunkt und startet zufällig.")
+                print(f"Warnung: Agent {i} startet zufällig ohne Anker.")
                 while True:
                     spawn_pos_cand = (self.random.randrange(width), self.random.randrange(height))
                     if not self._is_cell_occupied_for_initial_placement(spawn_pos_cand) and \
-                            not any(isinstance(agent, ResourceCollectorAgent) for agent in
+                            not any(isinstance(agent_on_cell, ResourceCollectorAgent) for agent_on_cell in
                                     self.grid.get_cell_list_contents([spawn_pos_cand])):
-                        spawn_pos = spawn_pos_cand
+                        spawn_pos = spawn_pos_cand;
                         break
+                initial_anchor = None
             agent = ResourceCollectorAgent(creation_id=i, model=self, initial_anchor_point=initial_anchor)
             if spawn_pos:
                 self.grid.place_agent(agent, spawn_pos)
             else:
                 print(f"FEHLER: Konnte keinen Spawnpunkt für Agent {i} finden.")
 
+        self.resource_goals = RESOURCE_GOALS
+        self.simulation_running = True
+        self.completion_step = -1
+
     def _is_cell_occupied_for_initial_placement(self, pos):
         return pos in self.occupied_for_initial_resource_placement
 
     def _place_base(self, grid_width, grid_height):
         center_x = grid_width // 2;
-        center_y = grid_height // 2
+        center_y = grid_height // 2;
         self.base_coords_list = []
         start_bx = center_x - BASE_SIZE // 2;
         start_by = center_y - BASE_SIZE // 2
         for j_offset in range(BASE_SIZE):
             for i_offset in range(BASE_SIZE):
                 self.base_coords_list.append((start_bx + i_offset, start_by + j_offset))
-        if self.base_coords_list:
-            self.base_deposit_point = self.base_coords_list[0]
+        if self.base_coords_list: self.base_deposit_point = self.base_coords_list[0]
 
     def _place_blackboard_object(self, grid_width, grid_height):
-        if not self.base_coords_list: return
+        if not self.base_coords_list:
+            print("Warnung: Basis nicht platziert, Blackboard-Position kann nicht bestimmt werden.")
+            return
         max_base_x = max(c[0] for c in self.base_coords_list)
         min_base_y_for_bb_alignment = min(
             c[1] for c in self.base_coords_list if c[0] == min(b[0] for b in self.base_coords_list))
         start_x = max_base_x + 2;
-        start_y = min_base_y_for_bb_alignment
+        start_y = min_base_y_for_bb_alignment;
         self.blackboard_coords_list = []
         for j in range(BLACKBOARD_SIZE_Y):
             for i in range(BLACKBOARD_SIZE_X):
@@ -143,23 +151,58 @@ class AoELiteModel(mesa.Model):
                 f"Warnung: Nur {patches_placed_this_type}/{total_patches_to_place} {resource_type}-Patches platziert.")
 
     def update_blackboard_cell(self, pos, agent_reported_state):
-        """Aktualisiert eine Zelle im Blackboard basierend auf der Meldung eines Agenten."""
         x, y = pos
-        if not (0 <= x < self.grid.width and 0 <= y < self.grid.height):
-            return
-
+        if not (0 <= x < self.grid.width and 0 <= y < self.grid.height): return
         current_bb_state = self.blackboard_map[x, y]
-
-        # Konfliktlösungsregeln:
         if agent_reported_state == RESOURCE_COLLECTED_BY_ME or agent_reported_state == EMPTY_EXPLORED:
-            self.blackboard_map[x, y] = agent_reported_state
-        elif agent_reported_state == WOOD_SEEN or agent_reported_state == STONE_SEEN:
-            if current_bb_state == UNKNOWN or current_bb_state == EMPTY_EXPLORED:
-                self.blackboard_map[x, y] = agent_reported_state
-        elif agent_reported_state == BASE_KNOWN:
-            if current_bb_state == UNKNOWN:
-                self.blackboard_map[x, y] = agent_reported_state
-        # UNKNOWN vom Agenten überschreibt nichts Sinnvolles auf dem Blackboard.
+            self.blackboard_map[x, y] = EMPTY_EXPLORED
+            if pos in self.resource_claims:  # Wenn Zelle geclaimt war, Claim auf BB entfernen
+                del self.resource_claims[pos]
+            return
+        if current_bb_state == EMPTY_EXPLORED: return
+        if agent_reported_state == WOOD_SEEN or agent_reported_state == STONE_SEEN:
+            if current_bb_state == UNKNOWN or current_bb_state == BASE_KNOWN:
+                self.blackboard_map[x, y] = agent_reported_state;
+                return
+        if agent_reported_state == BASE_KNOWN:
+            if current_bb_state == UNKNOWN: self.blackboard_map[x, y] = agent_reported_state; return
+
+    def add_claim(self, pos, agent_id):
+        """Agent versucht, eine Ressource an pos zu claimen."""
+        # KORREKTUR: self.model.resources_on_grid zu self.resources_on_grid
+        # Und self.blackboard_map[pos[0], pos[1]] direkt verwenden
+        if pos not in self.resources_on_grid and \
+                self.blackboard_map[pos[0], pos[1]] not in [WOOD_SEEN, STONE_SEEN]:
+            return False
+
+        current_claimant = self.resource_claims.get(pos)
+        if current_claimant is None or current_claimant == agent_id:
+            self.resource_claims[pos] = agent_id
+            return True
+        return False
+
+    def remove_claim(self, pos, agent_id):
+        """Agent gibt einen Claim frei."""
+        current_claimant = self.resource_claims.get(pos)
+        if current_claimant == agent_id:
+            del self.resource_claims[pos]
+            return True
+        return False
+
+    def get_claimant(self, pos):
+        """Gibt die ID des Agenten zurück, der die Position geclaimt hat, oder None."""
+        return self.resource_claims.get(pos)
 
     def step(self):
+        if not self.simulation_running: return
+        self.current_step += 1
         self.agents.shuffle_do("step")
+        goals_met_count = 0
+        for resource_type, target_amount in self.resource_goals.items():
+            if self.base_resources_collected.get(resource_type, 0) >= target_amount:
+                goals_met_count += 1
+        if goals_met_count == len(self.resource_goals) and self.simulation_running:
+            self.simulation_running = False;
+            self.completion_step = self.current_step
+            print(f"----- ZIELE ERREICHT in {self.completion_step} Schritten! -----")
+            print(f"Gesammelte Ressourcen: {self.base_resources_collected}")

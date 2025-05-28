@@ -61,6 +61,9 @@ KEY_VIEW_AGENT_2 = pygame.K_2
 KEY_VIEW_AGENT_3 = pygame.K_3
 KEY_VIEW_AGENT_4 = pygame.K_4 # Entspricht Agent mit Index 3
 
+# Globale Ressourcenziele für die Basis
+RESOURCE_GOALS = {'wood': 15, 'stone': 10}
+
 # Simulationsgeschwindigkeit
 SIMULATION_STEPS_PER_SECOND = 20 # Etwas schneller für mehr Interaktion
 FRAMES_PER_SECOND = 30
