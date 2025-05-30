@@ -7,7 +7,7 @@ from src.config import (
     UNKNOWN_CELL_COLOR, BLACKBOARD_OBJECT_COLOR,
     KEY_VIEW_BLACKBOARD, KEY_VIEW_AGENT_1, KEY_VIEW_AGENT_2, KEY_VIEW_AGENT_3, KEY_VIEW_AGENT_4,
     KEY_VIEW_AGENT_5, KEY_VIEW_AGENT_6, KEY_VIEW_AGENT_7, KEY_VIEW_AGENT_8, KEY_VIEW_AGENT_9,
-    SUPERVISOR_COLOR, WORKER_COLOR, AGENT_COLOR
+    SUPERVISOR_COLOR, WORKER_COLOR, AGENT_COLOR, SUPERVISOR_CLAIMED_RESOURCE
 )
 from src.model import AoELiteModel
 from src.supervisor_agent import SupervisorAgent
@@ -83,6 +83,11 @@ def draw_world_view(screen, model, view_mode, selected_agent_idx):
                             cell_color_to_draw = WOOD_COLOR
                         elif known_status == STONE_SEEN:
                             cell_color_to_draw = STONE_COLOR
+                        elif known_status == SUPERVISOR_CLAIMED_RESOURCE:  # NEU
+                            # Du kannst hier entscheiden, wie es aussehen soll.
+                            # Z.B. eine leicht andere Farbe als die normale Ressource oder ein Overlay.
+                            # Fürs Erste: eine deutliche "Claimed"-Farbe.
+                            cell_color_to_draw = (160, 160, 160)  # Helleres Grau für Claimed
                         elif known_status == BASE_KNOWN or \
                                 ((gx, gy) in model.base_coords_list and \
                                  (view_mode == "BLACKBOARD" or \
@@ -90,11 +95,11 @@ def draw_world_view(screen, model, view_mode, selected_agent_idx):
                             cell_color_to_draw = BASE_COLOR
                         elif known_status == EMPTY_EXPLORED or known_status == RESOURCE_COLLECTED_BY_ME:
                             cell_color_to_draw = WHITE
-                        else:
-                            cell_color_to_draw = WHITE
+                        else:  # Fallback für andere/unerwartete Status, die nicht UNKNOWN sind
+                            cell_color_to_draw = WHITE  # oder BLACK für Fehler
                     pygame.draw.rect(screen, cell_color_to_draw, pygame_rect)
-                else:
-                    pygame.draw.rect(screen, BLACK, pygame_rect)
+                else:  # Außerhalb der map_to_display Grenzen (sollte nicht passieren bei korrekter Iteration)
+                    pygame.draw.rect(screen, BLACK, pygame_rect)  # Schwarz für Fehler
     else:
         for gx_ in range(model.grid_width_val):
             for gy_ in range(model.grid_height_val):

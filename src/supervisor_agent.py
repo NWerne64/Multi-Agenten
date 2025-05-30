@@ -2,14 +2,20 @@
 import mesa
 import numpy as np
 import itertools
-from src.config import UNKNOWN, EMPTY_EXPLORED, BASE_KNOWN, WOOD_SEEN, STONE_SEEN, RESOURCE_COLLECTED_BY_ME
+from src.config import (
+    UNKNOWN, EMPTY_EXPLORED, BASE_KNOWN,
+    WOOD_SEEN, STONE_SEEN, RESOURCE_COLLECTED_BY_ME,
+    SUPERVISOR_CLAIMED_RESOURCE,
+    MIN_EXPLORE_TARGET_SEPARATION
+)
 
 
 class SupervisorAgent(mesa.Agent):
+    NEIGHBOR_OFFSETS = [(dx, dy) for dx in [-1, 0, 1] for dy in [-1, 0, 1] if not (dx == 0 and dy == 0)]
+
     def __init__(self, model, home_pos, role_id_for_display="supervisor_0"):
         super().__init__(model=model)
         self.role_id = role_id_for_display
-
         self.home_pos = home_pos
         self.supervisor_known_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN, dtype=int)
 
@@ -24,56 +30,60 @@ class SupervisorAgent(mesa.Agent):
                 self.supervisor_known_map[base_coord[0], base_coord[1]] = BASE_KNOWN
 
         self.worker_status = {}
-        self.task_queue = []  # Aufgaben werden hier mit Priorität eingefügt (Sammeln > Exploration)
+        self.task_queue = []
         self.assigned_tasks = {}
         self.resource_goals = self.model.resource_goals.copy()
         self._pending_worker_reports = []
         self._tasks_to_assign_to_worker = {}
 
-        # Limits, wie viele *neue* Tasks pro Step maximal *geplant* werden sollen (nicht unbedingt zugewiesen)
-        self.max_new_collect_tasks_per_planning = self.model.num_agents_val  # Plane potenziell für jeden Worker
+        self.max_new_collect_tasks_per_planning = self.model.num_agents_val
         self.max_new_explore_tasks_per_planning = self.model.num_agents_val
 
         self.pending_exploration_targets = set()
         self.task_id_counter = itertools.count(1)
 
+        self.MIN_EXPLORE_TARGET_SEPARATION_val = MIN_EXPLORE_TARGET_SEPARATION
+
+    def _manhattan_distance(self, pos1, pos2):
+        if pos1 is None or pos2 is None: return float('inf')
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+
     def step(self):
         self._process_pending_reports()
         self._update_task_statuses_and_cleanup()
-        self._plan_new_tasks()  # Füllt die task_queue
-        self._prepare_tasks_for_assignment()  # Versucht, Aufgaben aus der Queue an wartende Worker zu geben
+        self._plan_new_tasks()  # Hier war der Fehler
+        self._prepare_tasks_for_assignment()
 
     def _process_pending_reports(self):
-        # ... (Inhalt der Methode bleibt gleich wie in deiner letzten funktionierenden Version) ...
-        for report in self._pending_worker_reports:
+        reports_to_process = list(
+            self._pending_worker_reports)  # Bearbeite eine Kopie, um Modifikationen während der Iteration zu erlauben
+        self._pending_worker_reports.clear()  # Leere die Originalliste sofort
+
+        for report in reports_to_process:
             worker_id = report['worker_id']
-            report_type = report['report_type']
             data = report['data']
+
             self.worker_status.setdefault(worker_id, {})
-            if 'current_pos' in data:
-                self.worker_status[worker_id]['last_pos'] = data['current_pos']
+            if 'current_pos' in data: self.worker_status[worker_id]['last_pos'] = data['current_pos']
+
             new_worker_state = data.get('status')
-            if new_worker_state:
-                self.worker_status[worker_id]['state'] = new_worker_state
             task_id_in_report = data.get('task_id')
-            if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED']:
-                self.worker_status[worker_id]['current_task_id'] = None
-                if task_id_in_report and task_id_in_report in self.assigned_tasks:
-                    task_details = self.assigned_tasks.get(task_id_in_report)
-                    if task_details and task_details.get('worker_id') == worker_id:
-                        if task_details.get('type') == 'explore_area' and 'path_to_explore' in task_details:
-                            for pos_on_route in task_details['path_to_explore']:
-                                self.pending_exploration_targets.discard(pos_on_route)
-                        del self.assigned_tasks[task_id_in_report]
-            elif new_worker_state == 'IDLE_AT_SUPERVISOR':
-                self.worker_status[worker_id]['current_task_id'] = None
+            task_details_for_report = self.assigned_tasks.get(task_id_in_report) if task_id_in_report else None
+
             if 'map_segment_updates' in data:
                 for pos, reported_state in data['map_segment_updates'].items():
                     px, py = pos
-                    if 0 <= px < self.supervisor_known_map.shape[0] and \
-                            0 <= py < self.supervisor_known_map.shape[1]:
-                        current_supervisor_state = self.supervisor_known_map[px, py]
-                        new_state_to_set = current_supervisor_state
+                    if not (0 <= px < self.supervisor_known_map.shape[0] and 0 <= py < self.supervisor_known_map.shape[
+                        1]):
+                        continue
+
+                    current_supervisor_state = self.supervisor_known_map[px, py]
+                    new_state_to_set = current_supervisor_state
+
+                    if current_supervisor_state == SUPERVISOR_CLAIMED_RESOURCE:
+                        if reported_state == RESOURCE_COLLECTED_BY_ME or reported_state == EMPTY_EXPLORED:
+                            new_state_to_set = EMPTY_EXPLORED
+                    else:
                         if reported_state == RESOURCE_COLLECTED_BY_ME:
                             new_state_to_set = EMPTY_EXPLORED
                         elif reported_state in [WOOD_SEEN, STONE_SEEN]:
@@ -83,25 +93,52 @@ class SupervisorAgent(mesa.Agent):
                                                               STONE_SEEN] and current_supervisor_state != reported_state:
                                 new_state_to_set = reported_state
                         elif reported_state == BASE_KNOWN:
-                            if current_supervisor_state == UNKNOWN or current_supervisor_state == EMPTY_EXPLORED:
+                            if current_supervisor_state in [UNKNOWN, EMPTY_EXPLORED]:
                                 new_state_to_set = reported_state
                         elif reported_state == EMPTY_EXPLORED:
-                            if current_supervisor_state != RESOURCE_COLLECTED_BY_ME:
-                                if current_supervisor_state == UNKNOWN or current_supervisor_state in [WOOD_SEEN,
-                                                                                                       STONE_SEEN]:  # Leer überschreibt auch gesehene Ressourcen
-                                    new_state_to_set = reported_state
-                        if current_supervisor_state != new_state_to_set:
-                            print(
-                                f"Supervisor DEBUG Map Update: Pos {pos} von {current_supervisor_state} zu {new_state_to_set} (Worker meldete: {reported_state})")
-                            self.supervisor_known_map[px, py] = new_state_to_set
-        self._pending_worker_reports.clear()
+                            if current_supervisor_state in [UNKNOWN, WOOD_SEEN, STONE_SEEN, BASE_KNOWN]:
+                                new_state_to_set = reported_state
+
+                    if current_supervisor_state != new_state_to_set:
+                        # print(f"Supervisor DEBUG Map Update (Step {self.model.steps}): Pos {pos} von {current_supervisor_state} zu {new_state_to_set} (Worker {worker_id} meldete: {reported_state}, Report-TaskID: {task_id_in_report})")
+                        self.supervisor_known_map[px, py] = new_state_to_set
+
+            if new_worker_state:
+                self.worker_status[worker_id]['state'] = new_worker_state
+
+            if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED']:
+                self.worker_status[worker_id]['current_task_id'] = None
+                if task_details_for_report and task_details_for_report.get('worker_id') == worker_id:
+                    task_type = task_details_for_report.get('type')
+                    target_pos = task_details_for_report.get('target_pos')
+                    path_to_explore = task_details_for_report.get('path_to_explore')
+
+                    if task_type == 'explore_area' and path_to_explore:
+                        for pos_on_route in path_to_explore:
+                            self.pending_exploration_targets.discard(pos_on_route)
+
+                    elif task_type == 'collect_resource' and target_pos:
+                        current_map_val_at_target = self.supervisor_known_map[target_pos[0], target_pos[1]]
+                        if new_worker_state == 'TASK_FAILED':
+                            reported_state_at_target = data.get('map_segment_updates', {}).get(target_pos)
+                            if current_map_val_at_target == SUPERVISOR_CLAIMED_RESOURCE:
+                                if reported_state_at_target in [WOOD_SEEN, STONE_SEEN]:
+                                    self.supervisor_known_map[target_pos[0], target_pos[1]] = reported_state_at_target
+                                    # print(f"Supervisor (Step {self.model.steps}): CLAIMED Ressource bei {target_pos} (Task {task_id_in_report} FAILED) als {reported_state_at_target} wieder freigegeben.")
+                                elif reported_state_at_target == EMPTY_EXPLORED or reported_state_at_target == RESOURCE_COLLECTED_BY_ME:
+                                    self.supervisor_known_map[target_pos[0], target_pos[1]] = EMPTY_EXPLORED
+                                    # print(f"Supervisor (Step {self.model.steps}): CLAIMED Ressource bei {target_pos} (Task {task_id_in_report} FAILED) als EMPTY markiert.")
+
+                    if task_id_in_report in self.assigned_tasks:
+                        del self.assigned_tasks[task_id_in_report]
+
+            elif new_worker_state == 'IDLE_AT_SUPERVISOR':
+                self.worker_status[worker_id]['current_task_id'] = None
 
     def _update_task_statuses_and_cleanup(self):
-        # ... (Inhalt der Methode bleibt gleich) ...
         pass
 
     def _is_target_already_assigned_or_queued(self, target_pos_to_check, task_type, resource_type=None):
-        # ... (Inhalt der Methode bleibt gleich) ...
         for task_data in list(self.assigned_tasks.values()) + self.task_queue:
             current_task_main_target = None
             if task_data.get('type') == 'explore_area' and task_data.get('path_to_explore'):
@@ -112,203 +149,202 @@ class SupervisorAgent(mesa.Agent):
 
             if task_data.get('type') == task_type and current_task_main_target == target_pos_to_check:
                 if task_type == 'collect_resource':
-                    if task_data.get('resource_type') == resource_type:
-                        return True
+                    if task_data.get('resource_type') == resource_type: return True
                 elif task_type == 'explore_area':
                     return True
+
         if task_type == 'explore_area':
-            path_to_check = None
-            if isinstance(target_pos_to_check, list):
-                path_to_check = target_pos_to_check
-            elif isinstance(target_pos_to_check, tuple):
-                path_to_check = [target_pos_to_check]
-            if path_to_check:
-                for point_in_route in path_to_check:
-                    if point_in_route in self.pending_exploration_targets:
-                        return True
+            if isinstance(target_pos_to_check, tuple) and target_pos_to_check in self.pending_exploration_targets:
+                return True
         return False
 
-    # --- ÜBERARBEITET: _plan_new_tasks mit klarer Priorisierung ---
     def _plan_new_tasks(self):
-        wood_on_map = np.count_nonzero(self.supervisor_known_map == WOOD_SEEN)
-        stone_on_map = np.count_nonzero(self.supervisor_known_map == STONE_SEEN)
-        print(
-            f"Supervisor Planung (Step {self.model.steps}): Map: H={wood_on_map}, S={stone_on_map}. Tasks Queue: {len(self.task_queue)}, Assigned: {len(self.assigned_tasks)}")
-
+        # KORREKTUR: Initialisierung außerhalb des if-Blocks
         collect_tasks_added_now = 0
         explore_tasks_added_now = 0
 
-        # --- Phase 1: Sammelaufgaben haben hohe Priorität ---
-        # Sortiere Ziele nach Dringlichkeit (wie viel fehlt noch?)
+        if self.model.steps % 10 == 0:
+            wood_on_map = np.count_nonzero(self.supervisor_known_map == WOOD_SEEN)
+            stone_on_map = np.count_nonzero(self.supervisor_known_map == STONE_SEEN)
+            claimed_resources = np.count_nonzero(self.supervisor_known_map == SUPERVISOR_CLAIMED_RESOURCE)
+            pending_expl_count = len(self.pending_exploration_targets)
+            # print(f"Supervisor Planung (Step {self.model.steps}): Map: H={wood_on_map}, S={stone_on_map}, Claimed={claimed_resources}. Tasks Q: {len(self.task_queue)}, Assigned: {len(self.assigned_tasks)}, PendingExplo: {pending_expl_count}")
+
+        # --- Phase 1: Sammelaufgaben ---
         resource_priority = sorted(
             self.resource_goals.keys(),
             key=lambda r: (self.resource_goals[r] - self.model.base_resources_collected.get(r, 0)),
             reverse=True
         )
-
         for res_type in resource_priority:
-            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning:
-                break  # Tageslimit für neue Sammelaufgaben erreicht
-
+            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             needed_amount = self.resource_goals.get(res_type, 0) - self.model.base_resources_collected.get(res_type, 0)
-            if needed_amount <= 0:
-                continue  # Ziel für diesen Ressourcentyp bereits erfüllt
-
+            if needed_amount <= 0: continue
             resource_seen_constant = WOOD_SEEN if res_type == 'wood' else STONE_SEEN
 
             candidate_patches_coords = []
             rows, cols = np.where(self.supervisor_known_map == resource_seen_constant)
             for r_idx, c_idx in zip(rows, cols):
-                candidate_patches_coords.append((r_idx, c_idx))
-
+                candidate_patches_coords.append((int(r_idx), int(c_idx)))
             self.model.random.shuffle(candidate_patches_coords)
 
             for patch_pos in candidate_patches_coords:
                 if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type):
                     continue
-
+                px, py = patch_pos
+                self.supervisor_known_map[px, py] = SUPERVISOR_CLAIMED_RESOURCE
                 new_collect_task = {
                     'task_id': f"task_collect_{next(self.task_id_counter)}",
-                    'type': 'collect_resource',
-                    'target_pos': patch_pos,
-                    'resource_type': res_type,
-                    'status': 'pending_assignment'
+                    'type': 'collect_resource', 'target_pos': patch_pos,
+                    'resource_type': res_type, 'status': 'pending_assignment'
                 }
-                # Füge Sammelaufgaben an den ANFANG der Queue (höhere Priorität)
                 self.task_queue.insert(0, new_collect_task)
-                print(
-                    f"Supervisor: NEUE SAMMELAUFGABE {new_collect_task['task_id']} (Sammle {res_type} bei {patch_pos}) zur Queue hinzugefügt.")
+                # print(f"Supervisor (Step {self.model.steps}): NEUE SAMMELAUFGABE {new_collect_task['task_id']} für {res_type} bei {patch_pos}. Map -> CLAIMED.")
                 collect_tasks_added_now += 1
-                if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning:
-                    break  # Breche auch die patch_pos Schleife, wenn Limit erreicht
-            # Das äußere `break` (für res_type) wird durch die Bedingung am Anfang der äußeren Schleife gehandhabt.
+                if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
+            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
-        # --- Phase 2: Explorationsaufgaben, wenn Kapazität und Bedarf ---
-        # Bedarf an Exploration definieren: z.B. wenn noch Ziele offen sind und Ressourcen dafür nicht bekannt,
-        # oder wenn ein Großteil der Karte unbekannt ist.
-
-        # Zähle, wie viele Ressourcen noch fehlen, für die wir keine Standorte kennen
+        # --- Phase 2: Explorationsaufgaben ---
         unlocated_needed_resources = 0
-        for res_type, target_amount in self.resource_goals.items():
-            if self.model.base_resources_collected.get(res_type, 0) < target_amount:
-                res_const = WOOD_SEEN if res_type == 'wood' else STONE_SEEN
+        for res_type_iter, target_amount in self.resource_goals.items():
+            if self.model.base_resources_collected.get(res_type_iter, 0) < target_amount:
+                res_const = WOOD_SEEN if res_type_iter == 'wood' else STONE_SEEN
                 if np.count_nonzero(self.supervisor_known_map == res_const) == 0:
                     unlocated_needed_resources += 1
-
-        # Grober Schätzer für "Karte ist noch sehr unbekannt"
         unknown_ratio = np.count_nonzero(self.supervisor_known_map == UNKNOWN) / (
-                    self.model.grid_width_val * self.model.grid_height_val)
+                self.model.grid_width_val * self.model.grid_height_val)
+        should_explore_actively = (unlocated_needed_resources > 0 or unknown_ratio > 0.65)
 
-        # Exploriere, wenn (noch Ressourcen unbekannt sind UND wir nicht schon max Sammelaufgaben geplant haben)
-        # ODER (die Karte noch sehr unbekannt ist UND wir nicht schon max Sammelaufgaben geplant haben)
-        # UND das Limit für neue Explorationsaufgaben noch nicht erreicht ist.
-        # Die Logik: Wenn wir schon viele Sammelaufgaben planen konnten, ist Exploration vllt. weniger dringend.
+        temp_pending_targets_this_step = set()
 
-        should_explore_actively = (unlocated_needed_resources > 0 or unknown_ratio > 0.75)
+        while should_explore_actively and explore_tasks_added_now < self.max_new_explore_tasks_per_planning:
+            exploration_target_cell = self._find_best_frontier_for_exploration(temp_pending_targets_this_step)
 
-        if should_explore_actively and explore_tasks_added_now < self.max_new_explore_tasks_per_planning:
-            exploration_route = self._generate_exploration_route()
-            if not exploration_route:
-                exploration_route = self._generate_initial_random_exploration_target_route()
-
-            if exploration_route:
-                # Prüfe den Startpunkt der Route
-                if not self._is_target_already_assigned_or_queued(exploration_route, 'explore_area'):
+            if exploration_target_cell:
+                if not self._is_target_already_assigned_or_queued(exploration_target_cell, 'explore_area'):
                     new_explore_task = {
                         'task_id': f"task_explore_{next(self.task_id_counter)}",
-                        'type': 'explore_area',
-                        'path_to_explore': exploration_route,
-                        'status': 'pending_assignment',
-                        'target_pos': exploration_route[0]
+                        'type': 'explore_area', 'path_to_explore': [exploration_target_cell],
+                        'status': 'pending_assignment', 'target_pos': exploration_target_cell
                     }
-                    # Füge Explorationsaufgaben ans ENDE der Queue (niedrigere Priorität als Sammeln)
                     self.task_queue.append(new_explore_task)
-                    print(
-                        f"Supervisor: Neue Explorationsaufgabe {new_explore_task['task_id']} (Route: {exploration_route[:2]}...) zur Queue hinzugefügt.")
-                    for pos_on_route in exploration_route:
-                        self.pending_exploration_targets.add(pos_on_route)
+                    self.pending_exploration_targets.add(exploration_target_cell)
+                    temp_pending_targets_this_step.add(exploration_target_cell)
+                    # print(f"Supervisor (Step {self.model.steps}): Neue Frontier-Explo {new_explore_task['task_id']} für {exploration_target_cell} zur Queue.")
                     explore_tasks_added_now += 1
+                else:
+                    break
+            else:
+                break
 
-    # --- Ende _plan_new_tasks ---
+    def _find_best_frontier_for_exploration(self, temp_excluded_targets=None):
+        if temp_excluded_targets is None:
+            temp_excluded_targets = set()
 
-    def _generate_exploration_route(self):
-        # ... (Inhalt bleibt wie in der vorherigen Antwort) ...
-        NEIGHBOR_OFFSETS = [(dx, dy) for dx in [-1, 0, 1] for dy in [-1, 0, 1] if not (dx == 0 and dy == 0)]
-        ROUTE_LENGTH = self.model.random.randint(3, 6)
-        parent_candidates_info = []
+        candidate_frontiers = []
+        evaluated_frontiers = set()
+
         known_passable_rows, known_passable_cols = np.where(
             (self.supervisor_known_map == EMPTY_EXPLORED) |
             (self.supervisor_known_map == BASE_KNOWN)
         )
-        if not known_passable_rows.size: return None
-        all_parent_candidates = list(zip(known_passable_rows, known_passable_cols))
-        self.model.random.shuffle(all_parent_candidates)
-        for parent_pos in all_parent_candidates[:50]:
-            self.model.random.shuffle(NEIGHBOR_OFFSETS)
-            for dx_start, dy_start in NEIGHBOR_OFFSETS:
-                first_unknown_step = (parent_pos[0] + dx_start, parent_pos[1] + dy_start)
-                if 0 <= first_unknown_step[0] < self.model.grid_width_val and \
-                        0 <= first_unknown_step[1] < self.model.grid_height_val and \
-                        self.supervisor_known_map[first_unknown_step[0], first_unknown_step[1]] == UNKNOWN and \
-                        first_unknown_step not in self.pending_exploration_targets:
-                    route = [first_unknown_step]
-                    current_pos_on_route = first_unknown_step
-                    for _ in range(ROUTE_LENGTH - 1):
-                        next_pos_on_route = (current_pos_on_route[0] + dx_start, current_pos_on_route[1] + dy_start)
-                        if 0 <= next_pos_on_route[0] < self.model.grid_width_val and \
-                                0 <= next_pos_on_route[1] < self.model.grid_height_val and \
-                                (self.supervisor_known_map[next_pos_on_route[0], next_pos_on_route[1]] == UNKNOWN or \
-                                 next_pos_on_route == route[0]) and \
-                                next_pos_on_route not in self.pending_exploration_targets:
-                            route.append(next_pos_on_route)
-                            current_pos_on_route = next_pos_on_route
-                        else:
-                            break
-                    if route: return route
-        return None
+        parent_cell_coords = list(zip(map(int, known_passable_rows), map(int, known_passable_cols)))
+        self.model.random.shuffle(parent_cell_coords)
 
-    def _generate_initial_random_exploration_target_route(self):
-        # ... (Inhalt bleibt wie in der vorherigen Antwort) ...
-        unknown_cells_coords = []
-        for r_idx in range(self.model.grid_width_val):
-            for c_idx in range(self.model.grid_height_val):
-                if self.supervisor_known_map[r_idx, c_idx] == UNKNOWN and (
-                r_idx, c_idx) not in self.pending_exploration_targets:
-                    unknown_cells_coords.append((r_idx, c_idx))
-        if unknown_cells_coords:
-            target_cell = self.model.random.choice(unknown_cells_coords)
-            return [target_cell]
+        for parent_pos in parent_cell_coords:
+            for dx, dy in self.NEIGHBOR_OFFSETS:
+                frontier_pos = (parent_pos[0] + dx, parent_pos[1] + dy)
+                if not (0 <= frontier_pos[0] < self.model.grid_width_val and 0 <= frontier_pos[
+                    1] < self.model.grid_height_val):
+                    continue
+
+                if self.supervisor_known_map[frontier_pos[0], frontier_pos[1]] == UNKNOWN and \
+                        frontier_pos not in self.pending_exploration_targets and \
+                        frontier_pos not in temp_excluded_targets and \
+                        frontier_pos not in evaluated_frontiers:
+                    evaluated_frontiers.add(frontier_pos)
+                    unknown_neighbors_of_frontier = 0
+                    for ndx, ndy in self.NEIGHBOR_OFFSETS:
+                        nnx, nny = frontier_pos[0] + ndx, frontier_pos[1] + ndy
+                        if 0 <= nnx < self.model.grid_width_val and \
+                                0 <= nny < self.model.grid_height_val and \
+                                self.supervisor_known_map[nnx, nny] == UNKNOWN:
+                            unknown_neighbors_of_frontier += 1
+                    score = unknown_neighbors_of_frontier
+                    candidate_frontiers.append({'pos': frontier_pos, 'score': score})
+
+        if not candidate_frontiers:
+            all_unknown_coords = []
+            u_rows, u_cols = np.where(self.supervisor_known_map == UNKNOWN)
+            for r_idx, c_idx in zip(u_rows, u_cols):
+                pos_tuple = (int(r_idx), int(c_idx))
+                if pos_tuple not in self.pending_exploration_targets and pos_tuple not in temp_excluded_targets:
+                    all_unknown_coords.append(pos_tuple)
+            if all_unknown_coords: return self.model.random.choice(all_unknown_coords)
+            return None
+
+        candidate_frontiers.sort(key=lambda f: f['score'], reverse=True)
+
+        targets_to_avoid_proximity_to = set(self.pending_exploration_targets)
+        targets_to_avoid_proximity_to.update(temp_excluded_targets)
+        for task_data in list(self.assigned_tasks.values()) + self.task_queue:
+            if task_data.get('type') == 'explore_area' and task_data.get('target_pos'):
+                targets_to_avoid_proximity_to.add(task_data.get('target_pos'))
+
+        top_score = candidate_frontiers[0]['score']
+        equally_good_candidates = [cand for cand in candidate_frontiers if cand['score'] == top_score]
+        self.model.random.shuffle(equally_good_candidates)
+
+        best_choice = None
+        for frontier_candidate in equally_good_candidates:
+            candidate_pos = frontier_candidate['pos']
+            is_far_enough = True
+            for existing_target in targets_to_avoid_proximity_to:
+                if self._manhattan_distance(candidate_pos, existing_target) < self.MIN_EXPLORE_TARGET_SEPARATION_val:
+                    is_far_enough = False;
+                    break
+            if is_far_enough:
+                best_choice = candidate_pos;
+                break
+
+        if not best_choice:
+            self.model.random.shuffle(candidate_frontiers)
+            for frontier_candidate in candidate_frontiers:
+                candidate_pos = frontier_candidate['pos']
+                is_far_enough = True
+                for existing_target in targets_to_avoid_proximity_to:
+                    if self._manhattan_distance(candidate_pos,
+                                                existing_target) < self.MIN_EXPLORE_TARGET_SEPARATION_val:
+                        is_far_enough = False;
+                        break
+                if is_far_enough:
+                    best_choice = candidate_pos;
+                    break
+
+        if best_choice: return best_choice
+        if candidate_frontiers: return candidate_frontiers[0]['pos']
         return None
 
     def _prepare_tasks_for_assignment(self):
-        # ... (Inhalt bleibt wie in der vorherigen Antwort) ...
         if not self.task_queue: return
-        for worker_id, status_data in list(self.worker_status.items()):
+        idle_workers = []
+        for worker_id, status_data in self.worker_status.items():
+            is_busy_or_getting_task = worker_id in self._tasks_to_assign_to_worker or \
+                                      (status_data.get('current_task_id') and \
+                                       status_data.get('current_task_id') in self.assigned_tasks)
+            if status_data.get('state') == 'IDLE_AT_SUPERVISOR' and not is_busy_or_getting_task:
+                idle_workers.append(worker_id)
+        self.model.random.shuffle(idle_workers)
+        for worker_id in idle_workers:
             if not self.task_queue: break
-            if status_data.get('state') == 'IDLE_AT_SUPERVISOR' and \
-                    worker_id not in self._tasks_to_assign_to_worker:
-                is_already_working_on_assigned_task = False
-                active_task_id_for_worker = status_data.get('current_task_id')
-                if active_task_id_for_worker and active_task_id_for_worker in self.assigned_tasks:
-                    if self.assigned_tasks[active_task_id_for_worker].get('worker_id') == worker_id:
-                        is_already_working_on_assigned_task = True
-                if is_already_working_on_assigned_task:
-                    continue
-                task_to_assign = self.task_queue.pop(0)  # Nimmt Aufgabe mit höchster Priorität (Anfang der Liste)
-                task_to_assign['status'] = 'assigned_pending_pickup'
-                self._tasks_to_assign_to_worker[worker_id] = task_to_assign
+            task_to_assign = self.task_queue.pop(0)
+            task_to_assign['status'] = 'assigned_pending_pickup'
+            self._tasks_to_assign_to_worker[worker_id] = task_to_assign
 
     def receive_report_from_worker(self, worker_id, report_type, data):
-        # ... (Inhalt bleibt wie in der vorherigen Antwort) ...
         self._pending_worker_reports.append({'worker_id': worker_id, 'report_type': report_type, 'data': data})
-        new_worker_state = data.get('status')
-        if new_worker_state:
-            self.worker_status.setdefault(worker_id, {})['state'] = new_worker_state
-            if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED', 'IDLE_AT_SUPERVISOR']:
-                self.worker_status[worker_id]['current_task_id'] = None
 
     def request_task_from_worker(self, worker_id):
-        # ... (Inhalt bleibt wie in der vorherigen Antwort) ...
         self.worker_status.setdefault(worker_id, {})['state'] = 'IDLE_AT_SUPERVISOR'
         self.worker_status[worker_id]['current_task_id'] = None
         self._prepare_tasks_for_assignment()
@@ -318,6 +354,5 @@ class SupervisorAgent(mesa.Agent):
             task['worker_id'] = worker_id
             self.assigned_tasks[task['task_id']] = task
             self.worker_status[worker_id]['current_task_id'] = task['task_id']
-            print(f"Supervisor: Aufgabe {task['task_id']} ({task.get('type')}) an Worker {worker_id} vergeben.")
             return task
         return None

@@ -52,7 +52,7 @@ class AoELiteModel(mesa.Model):
         self.BASE_KNOWN_val = BASE_KNOWN
         self.RESOURCE_COLLECTED_BY_ME_val = RESOURCE_COLLECTED_BY_ME
 
-        self.grid = mesa.space.MultiGrid(self.grid_width_val, self.grid_height_val, torus=True)
+        self.grid = mesa.space.MultiGrid(self.grid_width_val, self.grid_height_val, torus=False)
 
         self.base_coords_list = []
         self.base_deposit_point = None

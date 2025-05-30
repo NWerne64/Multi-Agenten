@@ -51,6 +51,7 @@ WOOD_SEEN = 2
 STONE_SEEN = 3
 BASE_KNOWN = 4
 RESOURCE_COLLECTED_BY_ME = 5
+SUPERVISOR_CLAIMED_RESOURCE = 6
 
 # Blackboard-Konfiguration (für dezentrale Strategie)
 BLACKBOARD_SIZE_X = 2
@@ -74,7 +75,7 @@ KEY_VIEW_AGENT_9 = pygame.K_9
 RESOURCE_GOALS = {'wood': 15, 'stone': 10}
 
 # Simulationsgeschwindigkeit
-SIMULATION_STEPS_PER_SECOND = 10
+SIMULATION_STEPS_PER_SECOND = 100
 FRAMES_PER_SECOND = 30
 
 # Für dezentrale Strategie:
@@ -85,3 +86,11 @@ INITIAL_EXPLORATION_ANCHORS = [
     (0.85, 0.85)
 ]
 ANCHOR_REACHED_THRESHOLD_DISTANCE = 5
+
+# NEU: Für Supervisor-gesteuerte Exploration
+MIN_EXPLORE_TARGET_SEPARATION = 20  # Mindestabstand zwischen neuen Explorationszielen des Supervisors
+
+# NEU: Für Worker-gesteuerte Kaskaden-Exploration (Chained Exploration)
+CHAINED_EXPLORATION_STEP_BUDGET = 75  # Max. Schritte, die ein Worker für die gesamte Kaskaden-Explo ausgibt
+MAX_CHAINED_FRONTIERS_VISITED = 5     # Max. Anzahl von Folge-Frontiers, die ein Worker pro Einsatz besucht
+CHAINED_LOCAL_EXPLORE_STEPS = 2       # Anzahl lokaler Schritte nach Erreichen einer Kaskaden-Frontier
