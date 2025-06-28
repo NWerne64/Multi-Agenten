@@ -97,6 +97,11 @@ class SupervisorAgent(mesa.Agent):
         if pos1 is None or pos2 is None: return float('inf')  #
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])  #
 
+    def _distance(self, pos1, pos2):
+        """Calculates the Euclidean distance between two points."""
+        if pos1 is None or pos2 is None: return float('inf')
+        return ((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2) ** 0.5
+
     def step(self):
         self._process_pending_reports()  #
         # self._update_task_statuses_and_cleanup() # Auskommentiert, da nicht implementiert
@@ -226,98 +231,174 @@ class SupervisorAgent(mesa.Agent):
                 return True  #
         return False  #
 
-    def _plan_new_tasks(self):  #
-        collect_tasks_added_now = 0;  #
-        explore_tasks_added_now = 0;  #
-        hotspots_created_this_step = 0  #
+    def _plan_new_tasks(self):
+        """
+        Hauptplanungsfunktion, die jetzt auch Touren plant.
+        Diese Funktion orchestriert die Erstellung von Sammel- und Erkundungsaufgaben.
+        Die Erkundungsaufgaben werden nun als Touren geplant.
+        """
+        collect_tasks_added_now = 0
+        explore_tasks_added_now = 0
+        hotspots_created_this_step = 0
 
-        if not self.initial_hotspot_planning_complete:  #
-            unattempted_hotspots_for_planning = 0  #
-            for hotspot_pos in self.initial_hotspots_abs:  #
-                if explore_tasks_added_now >= self.max_new_explore_tasks_per_planning: break  #
-                if hotspot_pos not in self.attempted_hotspots:  #
-                    unattempted_hotspots_for_planning += 1  #
-                    if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):  #
-                        new_hotspot_task = {'task_id': f"task_hotspot_{next(self.task_id_counter)}",  #
-                                            'type': 'explore_area', 'path_to_explore': [hotspot_pos],  #
-                                            'status': 'pending_assignment', 'target_pos': hotspot_pos,  #
-                                            'is_initial_hotspot_task': True}  #
-                        self.task_queue.insert(0, new_hotspot_task);  #
-                        self.attempted_hotspots.add(hotspot_pos)  #
-                        explore_tasks_added_now += 1;
-                        hotspots_created_this_step += 1  #
-            if unattempted_hotspots_for_planning == 0 and len(self.initial_hotspots_abs) > 0:  #
-                self.initial_hotspot_planning_complete = True  #
+        # --- Initiales Hotspot-Planning (unverändert) ---
+        if not self.initial_hotspot_planning_complete:
+            unattempted_hotspots_for_planning = 0
+            for hotspot_pos in self.initial_hotspots_abs:
+                if explore_tasks_added_now >= self.max_new_explore_tasks_per_planning: break
+                if hotspot_pos not in self.attempted_hotspots:
+                    unattempted_hotspots_for_planning += 1
+                    if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):
+                        new_hotspot_task = {'task_id': f"task_hotspot_{next(self.task_id_counter)}",
+                                            'type': 'explore_area', 'path_to_explore': [hotspot_pos],
+                                            'status': 'pending_assignment', 'target_pos': hotspot_pos,
+                                            'is_initial_hotspot_task': True}
+                        self.task_queue.insert(0, new_hotspot_task)
+                        self.attempted_hotspots.add(hotspot_pos)
+                        explore_tasks_added_now += 1
+                        hotspots_created_this_step += 1
+            if unattempted_hotspots_for_planning == 0 and len(self.initial_hotspots_abs) > 0:
+                self.initial_hotspot_planning_complete = True
 
+        # --- Ressourcen-Sammel-Planung (unverändert) ---
         resource_priority = sorted(self.resource_goals.keys(), key=lambda r: (
-                    self.resource_goals[r] - self.model.base_resources_collected.get(r, 0)), reverse=True)  #
-        for res_type in resource_priority:  #
-            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break  #
-            needed = self.resource_goals.get(res_type, 0) - self.model.base_resources_collected.get(res_type, 0)  #
-            if needed <= 0: continue  #
-            resource_seen_constant = WOOD_SEEN if res_type == 'wood' else STONE_SEEN  #
-            candidate_patches_coords = []  #
-            rows, cols = np.where(self.supervisor_known_map == resource_seen_constant)  #
-            for r_idx, c_idx in zip(rows, cols): candidate_patches_coords.append((int(r_idx), int(c_idx)))  #
-            self.model.random.shuffle(candidate_patches_coords)  #
-            for patch_pos in candidate_patches_coords:  #
-                if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type): continue  #
-                self.supervisor_known_map[patch_pos[0], patch_pos[1]] = SUPERVISOR_CLAIMED_RESOURCE  #
+                self.resource_goals[r] - self.model.base_resources_collected.get(r, 0)), reverse=True)
+        for res_type in resource_priority:
+            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
+            needed = self.resource_goals.get(res_type, 0) - self.model.base_resources_collected.get(res_type, 0)
+            if needed <= 0: continue
+            resource_seen_constant = WOOD_SEEN if res_type == 'wood' else STONE_SEEN
+            candidate_patches_coords = []
+            rows, cols = np.where(self.supervisor_known_map == resource_seen_constant)
+            for r_idx, c_idx in zip(rows, cols): candidate_patches_coords.append((int(r_idx), int(c_idx)))
+            self.model.random.shuffle(candidate_patches_coords)
+            for patch_pos in candidate_patches_coords:
+                if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type): continue
+                self.supervisor_known_map[patch_pos[0], patch_pos[1]] = SUPERVISOR_CLAIMED_RESOURCE
                 new_collect_task = {'task_id': f"task_collect_{next(self.task_id_counter)}", 'type': 'collect_resource',
                                     'target_pos': patch_pos, 'resource_type': res_type,
-                                    'status': 'pending_assignment'}  #
-                self.task_queue.insert(0, new_collect_task)  #
-                collect_tasks_added_now += 1  #
-                if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break  #
-            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break  #
+                                    'status': 'pending_assignment'}
+                self.task_queue.insert(0, new_collect_task)
+                collect_tasks_added_now += 1
+                if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
+            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
-        unlocated_needed_resources = 0  #
-        for res_type_iter, target_amount_iter in self.resource_goals.items():  #
-            if self.model.base_resources_collected.get(res_type_iter, 0) < target_amount_iter:  #
-                res_const = WOOD_SEEN if res_type_iter == 'wood' else STONE_SEEN  #
-                if np.count_nonzero(self.supervisor_known_map == res_const) == 0: unlocated_needed_resources += 1  #
+        # --- NEU: Logik, um zu entscheiden, ob Erkundung nötig ist (leicht angepasst) ---
+        unlocated_needed_resources = 0
+        for res_type_iter, target_amount_iter in self.resource_goals.items():
+            if self.model.base_resources_collected.get(res_type_iter, 0) < target_amount_iter:
+                res_const = WOOD_SEEN if res_type_iter == 'wood' else STONE_SEEN
+                if np.count_nonzero(self.supervisor_known_map == res_const) == 0: unlocated_needed_resources += 1
         current_unknown_logistics_ratio = np.count_nonzero(
-            self.supervisor_exploration_logistics_map == UNKNOWN) / self.total_grid_cells  #
+            self.supervisor_exploration_logistics_map == UNKNOWN) / self.total_grid_cells
         goals_fully_met = all(
             self.model.base_resources_collected.get(res_type, 0) >= target_amount for res_type, target_amount in
-            self.resource_goals.items())  #
-        should_explore_actively = False  #
-        if not goals_fully_met:  #
-            if unlocated_needed_resources > 0 or current_unknown_logistics_ratio > self.min_unknown_ratio_for_continued_exploration_val:  #
-                should_explore_actively = True  #
+            self.resource_goals.items())
 
-        if self.initial_hotspot_planning_complete or hotspots_created_this_step == 0:  #
-            temp_max_explore_tasks = self.max_new_explore_tasks_per_planning  #
-            temp_pending_targets_this_step = set()  #
+        should_explore_actively = False
+        if not goals_fully_met:
+            if unlocated_needed_resources > 0 or current_unknown_logistics_ratio > self.min_unknown_ratio_for_continued_exploration_val:
+                should_explore_actively = True
 
-            while should_explore_actively and explore_tasks_added_now < temp_max_explore_tasks:  #
-                exploration_target_cell = self._find_best_frontier_for_exploration(temp_pending_targets_this_step)  #
-                if exploration_target_cell:  #
-                    self.no_normal_target_found_count = 0  #
-                    if not self._is_target_already_assigned_or_queued(exploration_target_cell, 'explore_area'):  #
-                        new_explore_task = {'task_id': f"task_explore_{next(self.task_id_counter)}",
-                                            'type': 'explore_area', 'path_to_explore': [exploration_target_cell],
-                                            'status': 'pending_assignment', 'target_pos': exploration_target_cell,
-                                            'is_initial_hotspot_task': False}  #
-                        self.task_queue.append(new_explore_task)  #
-                        self.pending_exploration_targets.add(exploration_target_cell)  #
-                        temp_pending_targets_this_step.add(exploration_target_cell)  #
-                        explore_tasks_added_now += 1  #
-                    else:  #
-                        temp_pending_targets_this_step.add(exploration_target_cell)  #
-                        continue  #
-                else:
-                    self.no_normal_target_found_count += 1  #
-                    if self.no_normal_target_found_count >= self.CORRIDOR_ATTEMPT_THRESHOLD:  #
-                        corridor_task_planned = self._find_and_plan_corridor_task(temp_pending_targets_this_step)  #
-                        if corridor_task_planned:  #
-                            explore_tasks_added_now += 1  #
-                            self.no_normal_target_found_count = 0  #
-                            continue  #
-                        else:  #
-                            break  #
-                    else:  #
-                        break  #
+        # --- NEU: Aufruf der Tourenplanung ---
+        if should_explore_actively and (self.initial_hotspot_planning_complete or hotspots_created_this_step == 0):
+            # Wir rufen jetzt eine dedizierte Funktion auf, um Touren zu planen.
+            explore_tasks_added_now += self._plan_exploration_tours(
+                self.max_new_explore_tasks_per_planning - explore_tasks_added_now)
+
+        # Fallback auf Korridor-Exploration, wenn keine normalen Ziele gefunden werden (unverändert)
+        if explore_tasks_added_now == 0 and should_explore_actively:
+            self.no_normal_target_found_count += 1
+            if self.no_normal_target_found_count >= self.CORRIDOR_ATTEMPT_THRESHOLD:
+                if self._find_and_plan_corridor_task(set()):
+                    self.no_normal_target_found_count = 0
+        else:
+            self.no_normal_target_found_count = 0
+
+    # FÜGE DIESE GÄNZLICH NEUE FUNKTION IN DIE SupervisorAgent-KLASSE EIN
+    def _plan_exploration_tours(self, max_tours_to_plan):
+        """
+        Plant Erkundungs-Touren, indem es Ziele zu Paketen schnürt.
+        Iteration 1: Erstellt Touren mit genau zwei Zielen.
+        """
+        tours_planned = 0
+        temp_pending_targets_this_step = set()
+
+        # Hole alle aktuell zugewiesenen Ziele, um sie zu vermeiden
+        assigned_targets = self._get_all_assigned_targets()
+
+        while tours_planned < max_tours_to_plan:
+            # Finde das erste Ziel für die Tour
+            ziel_a = self._find_best_frontier_for_exploration(temp_pending_targets_this_step | assigned_targets)
+            if not ziel_a:
+                break  # Keine passenden Ziele mehr gefunden
+
+            temp_pending_targets_this_step.add(ziel_a)
+
+            # Finde das zweite, zu ziel_a nächstgelegene Ziel
+            # Dafür brauchen wir eine Liste potenzieller Ziele
+            candidate_frontiers = self._get_all_frontiers(temp_pending_targets_this_step | assigned_targets)
+
+            if not candidate_frontiers:
+                # Nur ein einziges Ziel gefunden, erstelle eine Tour mit einem Schritt
+                tour_paket = [{'type': 'explore_area', 'target_pos': ziel_a}]
+            else:
+                # Sortiere Kandidaten nach der Distanz zu ziel_a
+                candidate_frontiers.sort(key=lambda p: self._distance(p, ziel_a))
+                ziel_b = candidate_frontiers[0]
+                temp_pending_targets_this_step.add(ziel_b)
+
+                tour_paket = [
+                    {'type': 'explore_area', 'target_pos': ziel_a},
+                    {'type': 'explore_area', 'target_pos': ziel_b}
+                ]
+
+            # Erstelle die Tour-Aufgabe und füge sie zur Warteschlange hinzu
+            new_tour_task = {
+                'task_id': f"task_tour_{next(self.task_id_counter)}",
+                'type': 'execute_tour',  # Neuer Aufgabentyp
+                'tour_steps': tour_paket,
+                'status': 'pending_assignment'
+            }
+            self.task_queue.append(new_tour_task)
+            tours_planned += 1
+
+        return tours_planned
+
+    # FÜGE DIESE ZWEI NEUEN HELFERFUNKTIONEN HINZU
+    def _get_all_assigned_targets(self):
+        """Sammelt alle Ziele, die aktuell zugewiesen oder in der Warteschlange sind."""
+        targets = set()
+        all_tasks = list(self.assigned_tasks.values()) + self.task_queue
+        for task_data in all_tasks:
+            if task_data.get('type') == 'execute_tour':
+                for step in task_data.get('tour_steps', []):
+                    targets.add(step['target_pos'])
+            elif task_data.get('target_pos'):
+                targets.add(task_data.get('target_pos'))
+        return targets
+
+    def _get_all_frontiers(self, excluded_targets):
+        """Findet alle Frontier-Zellen, die nicht in excluded_targets sind."""
+        frontiers = []
+        logistics_map = self.supervisor_exploration_logistics_map
+        known_passable_rows, known_passable_cols = np.where(logistics_map == SUPERVISOR_LOGISTICS_KNOWN_PASSABLE)
+        parent_cell_coords = list(zip(map(int, known_passable_rows), map(int, known_passable_cols)))
+        self.model.random.shuffle(parent_cell_coords)
+
+        evaluated = set()
+        for parent_pos in parent_cell_coords:
+            for dx, dy in self.NEIGHBOR_OFFSETS:
+                frontier_pos = (parent_pos[0] + dx, parent_pos[1] + dy)
+                if not (0 <= frontier_pos[0] < self.model.grid_width_val and 0 <= frontier_pos[
+                    1] < self.model.grid_height_val):
+                    continue
+
+                if logistics_map[frontier_pos[0], frontier_pos[
+                    1]] == UNKNOWN and frontier_pos not in excluded_targets and frontier_pos not in evaluated:
+                    frontiers.append(frontier_pos)
+                    evaluated.add(frontier_pos)
+        return frontiers
 
     def _find_corridor_entry_candidate(self, temp_excluded_targets=None):  #
         if temp_excluded_targets is None: temp_excluded_targets = set()  #
@@ -566,44 +647,60 @@ class SupervisorAgent(mesa.Agent):
     def receive_report_from_worker(self, worker_id, report_type, data):  #
         self._pending_worker_reports.append({'worker_id': worker_id, 'report_type': report_type, 'data': data})  #
 
-    def request_task_from_worker(self, worker_id):  #
-        self.worker_status.setdefault(worker_id, {})['state'] = 'IDLE_AT_SUPERVISOR'  #
-        self.worker_status[worker_id]['current_task_id'] = None  #
+    def request_task_from_worker(self, worker_id):
+        """
+        Vergibt eine Aufgabe an einen Worker. Kann jetzt auch 'execute_tour'-Aufgaben vergeben.
+        """
+        self.worker_status.setdefault(worker_id, {})['state'] = 'IDLE_AT_SUPERVISOR'
+        self.worker_status[worker_id]['current_task_id'] = None
 
-        if worker_id in self._tasks_to_assign_to_worker:  #
-            task = self._tasks_to_assign_to_worker.pop(worker_id)  #
-            task['status'] = 'assigned';  #
-            task['worker_id'] = worker_id  #
-            self.assigned_tasks[task['task_id']] = task  #
-            self.worker_status[worker_id]['current_task_id'] = task['task_id']  #
+        if worker_id in self._tasks_to_assign_to_worker:
+            task = self._tasks_to_assign_to_worker.pop(worker_id)
+            task['status'] = 'assigned'
+            task['worker_id'] = worker_id
+            self.assigned_tasks[task['task_id']] = task
+            self.worker_status[worker_id]['current_task_id'] = task['task_id']
 
-            task_type_assigned = task.get('type')  #
-            log_target_info = "N/A"  #
+            task_type_assigned = task.get('type')
+            log_target_info = "N/A"
 
-            if task_type_assigned == 'explore_area':  #
-                target_for_projection = task.get('target_pos')  #
-                log_target_info = f"Area at {target_for_projection}"  #
-                if target_for_projection:  #
+            # Markiere die Zellen der Tour als "geplant"
+            if task_type_assigned == 'execute_tour':
+                tour_steps = task.get('tour_steps', [])
+                log_target_info = f"Tour mit {len(tour_steps)} Schritten. Ziele: {[step['target_pos'] for step in tour_steps]}"
+                for step in tour_steps:
+                    target_for_projection = step.get('target_pos')
+                    if target_for_projection:
+                        projected_cells = self._get_projected_explored_cells(target_for_projection,
+                                                                             self.model.agent_vision_radius_val)
+                        for cell_px, cell_py in projected_cells:
+                            if 0 <= cell_px < self.model.grid_width_val and 0 <= cell_py < self.model.grid_height_val:
+                                if self.supervisor_exploration_logistics_map[cell_px, cell_py] == UNKNOWN:
+                                    self.supervisor_exploration_logistics_map[
+                                        cell_px, cell_py] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED
+
+            # Bestehende Logik für andere Aufgabentypen (unverändert)
+            elif task_type_assigned == 'explore_area':
+                target_for_projection = task.get('target_pos')
+                log_target_info = f"Area at {target_for_projection}"
+                if target_for_projection:
                     projected_cells = self._get_projected_explored_cells(target_for_projection,
-                                                                         self.model.agent_vision_radius_val)  #
-                    for cell_px, cell_py in projected_cells:  #
-                        if 0 <= cell_px < self.model.grid_width_val and 0 <= cell_py < self.model.grid_height_val:  #
-                            if self.supervisor_exploration_logistics_map[cell_px, cell_py] == UNKNOWN:  #
+                                                                         self.model.agent_vision_radius_val)
+                    for cell_px, cell_py in projected_cells:
+                        if 0 <= cell_px < self.model.grid_width_val and 0 <= cell_py < self.model.grid_height_val:
+                            if self.supervisor_exploration_logistics_map[cell_px, cell_py] == UNKNOWN:
                                 self.supervisor_exploration_logistics_map[
-                                    cell_px, cell_py] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED  #
+                                    cell_px, cell_py] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED
+            elif task_type_assigned == 'explore_corridor':
+                corridor_path = task.get('corridor_path', [])
+                entry_pos = task.get('entry_pos')
+                log_target_info = f"Corridor from {entry_pos} via path (len {len(corridor_path)})"
+                if corridor_path:
+                    task_viz_info = {'entry_U': corridor_path[0], 'end_U': corridor_path[-1]}
+                    self.active_corridors_viz[task['task_id']] = task_viz_info
+            elif task_type_assigned == 'collect_resource':
+                log_target_info = f"Resource at {task.get('target_pos')}"
 
-            elif task_type_assigned == 'explore_corridor':  #
-                corridor_path = task.get('corridor_path', [])  #
-                entry_pos = task.get('entry_pos')  #
-                log_target_info = f"Corridor from {entry_pos} via path (len {len(corridor_path)})"  #
-                if corridor_path:  #
-                    task_viz_info = {'entry_U': corridor_path[0], 'end_U': corridor_path[-1]}  #
-                    self.active_corridors_viz[task['task_id']] = task_viz_info  #
+            return task
 
-            elif task_type_assigned == 'collect_resource':  #
-                log_target_info = f"Resource at {task.get('target_pos')}"  #
-
-            # print(f"[S_AGENT {self.role_id}] (Step {self.model.steps}): Assigning task {task['task_id']} (Type: {task_type_assigned}, TargetInfo: {log_target_info}) to W{worker_id}.")
-            return task  #
-
-        return None  #
+        return None

@@ -99,20 +99,60 @@ class WorkerAgent(mesa.Agent):
             self.model.grid.move_agent(self, best_step)
 
     def _execute_fsm(self):
+        """
+        Haupt-Zustandsmaschine (FSM) des Workers.
+        Beinhaltet jetzt die Logik zur Abarbeitung von Touren.
+        """
         previous_state = self.state
 
         if self.state == "IDLE":
             self.state = "MOVING_TO_SUPERVISOR"
+
         elif self.state == "MOVING_TO_SUPERVISOR":
             if self.pos == self.supervisor_home_pos:
                 self.state = "AWAITING_TASK"
                 self._report_and_request_new_task()
             else:
                 self._move_towards(self.supervisor_home_pos)
+
         elif self.state == "AWAITING_TASK":
             if not self.current_task:
+                # Polling für neue Aufgaben, falls der Worker wartet
                 if self.pos == self.supervisor_home_pos and self.model.steps % 10 == self.unique_id % 10:
                     self._report_and_request_new_task()
+
+        # --- NEUER ZUSTAND FÜR DIE TOUR-ABARBEITUNG ---
+        elif self.state == "EXECUTING_TOUR":
+            if self.current_task is None or self.current_task.get('type') != 'execute_tour':
+                self._task_failed_or_issue("invalid_tour_task_data")
+                return
+
+            # Prüfen, ob die Tour abgeschlossen ist
+            if self.current_tour_step_index >= len(self.current_tour_steps):
+                self._task_completed()
+                return
+
+            # Das aktuelle Teil-Ziel aus der Tour holen
+            current_sub_task = self.current_tour_steps[self.current_tour_step_index]
+            target_pos = current_sub_task.get('target_pos')
+
+            if target_pos is None:  # Sicherheitsprüfung
+                self._task_failed_or_issue(f"tour_step_{self.current_tour_step_index}_missing_target")
+                return
+
+            # Prüfen, ob das Teil-Ziel erreicht wurde
+            if self.pos == target_pos:
+                # Hier wird die Aktion für das Teil-Ziel ausgeführt, in diesem Fall "erkunden"
+                # Eine einfache Form der Erkundung: Umgebung wahrnehmen
+                self._update_own_perception()
+
+                # Zum nächsten Schritt der Tour übergehen
+                self.current_tour_step_index += 1
+            else:
+                # Zum Ziel des aktuellen Tour-Schritts bewegen
+                self._move_towards(target_pos)
+
+        # --- Bestehende Logik für andere Aufgabentypen (weitgehend unverändert) ---
         elif self.state == "MOVING_TO_COLLECT_TARGET":
             if self.current_task is None: self.state = "IDLE"; return
             target = self.current_task['target_pos']
@@ -120,8 +160,8 @@ class WorkerAgent(mesa.Agent):
                 self.state = "COLLECTING_AT_TARGET"
             else:
                 self._move_towards(target)
+
         elif self.state == "COLLECTING_AT_TARGET":
-            # ... (Logik unverändert) ...
             if self.current_task is None: self.state = "IDLE"; return
             target_pos = self.current_task['target_pos']
             if self.inventory_slot is None and target_pos in self.model.resources_on_grid:
@@ -147,7 +187,6 @@ class WorkerAgent(mesa.Agent):
                 self._task_failed_or_issue(reason)
 
         elif self.state == "MOVING_TO_BASE_FOR_TASK_DELIVERY":
-            # ... (Logik unverändert) ...
             if self.current_task is None and self.inventory_slot is None: self.state = "IDLE"; return
             if self.pos == self.model.base_deposit_point:
                 if self.inventory_slot:
@@ -158,7 +197,10 @@ class WorkerAgent(mesa.Agent):
             else:
                 self._move_towards(self.model.base_deposit_point)
 
-        elif self.state == "MOVING_TO_EXPLORE_ROUTE_STEP":  # Für 'explore_area'
+        # Die spezifischen Zustände für explore_area und explore_corridor bleiben für den Fall,
+        # dass solche Aufgaben doch einzeln vergeben werden (z.B. Hotspots oder Korridore).
+        # Unsere neue Touren-Logik umgeht diese für die normale Erkundung.
+        elif self.state == "MOVING_TO_EXPLORE_ROUTE_STEP":
             if self.current_task is None or not self.current_task.get('path_to_explore'):
                 self._task_failed_or_issue("invalid_explore_task_data");
                 return
@@ -168,141 +210,121 @@ class WorkerAgent(mesa.Agent):
                 self.current_path_to_explore_index += 1
                 if self.current_path_to_explore_index >= len(path):
                     if self.is_current_task_initial_hotspot:
-                        # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Initial Hotspot {target_waypoint} reached. Task completed.")
                         self._task_completed()
                     else:
-                        # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Regular explore route to {target_waypoint} done. Starting local scan.")
                         self.state = "EXPLORING_LOCALLY_AFTER_SUPERVISOR_ROUTE"
                         self.local_exploration_steps_done = 0
             else:
                 self._move_towards(target_waypoint)
-        elif self.state == "EXPLORING_LOCALLY_AFTER_SUPERVISOR_ROUTE":  # Für 'explore_area'
+
+        elif self.state == "EXPLORING_LOCALLY_AFTER_SUPERVISOR_ROUTE":
             if self.local_exploration_steps_done < self.local_exploration_max_steps:
                 possible_moves = list(
                     self.model.grid.get_neighborhood(self.pos, moore=True, include_center=False, radius=1))
                 if possible_moves: self._move_towards(self.model.random.choice(possible_moves))
                 self.local_exploration_steps_done += 1
             else:
-                # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Local scan finished. Task completed.")
                 self._task_completed()
 
-        # MODIFIZIERT: Alte Stripe-Logik wird durch Korridor-Logik ersetzt
-        # Die alten Zustände MOVING_TO_STRIPE_START und FOLLOWING_STRIPE werden entfernt oder umbenannt.
-        # Wir führen MOVING_TO_CORRIDOR_ENTRY und FOLLOWING_CORRIDOR_PATH ein.
-
-        elif self.state == "MOVING_TO_CORRIDOR_ENTRY":  # NEUER ZUSTAND
+        elif self.state == "MOVING_TO_CORRIDOR_ENTRY":
             if self.current_task is None or self.current_task.get('type') != 'explore_corridor':
                 self._task_failed_or_issue("invalid_corridor_task_data_entry");
                 return
-
             target_entry_pos = self.current_task.get('entry_pos')
             if target_entry_pos is None:
                 self._task_failed_or_issue("corridor_task_missing_entry_pos");
                 return
-
             if self.pos == target_entry_pos:
-                # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Reached corridor entry {target_entry_pos}. Beginning corridor follow.")
                 self.state = "FOLLOWING_CORRIDOR_PATH"
-                self.current_corridor_path_index = 0  # Stelle sicher, dass der Index hier gestartet wird
+                self.current_corridor_path_index = 0
             else:
                 self._move_towards(target_entry_pos)
 
-        elif self.state == "FOLLOWING_CORRIDOR_PATH":  # NEUER ZUSTAND
+        elif self.state == "FOLLOWING_CORRIDOR_PATH":
             if self.current_task is None or self.current_task.get('type') != 'explore_corridor':
                 self._task_failed_or_issue("invalid_corridor_task_data_follow");
                 return
-
-            path = self.current_corridor_path  # Verwendet das in set_task initialisierte Attribut
-            if not path:  # Pfad sollte nicht leer sein, wenn Task korrekt gesetzt wurde
+            path = self.current_corridor_path
+            if not path:
                 self._task_failed_or_issue("corridor_task_empty_path");
                 return
-
             if self.current_corridor_path_index >= len(path):
-                # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Corridor path completed at {self.pos}. Task completed.")
-                self._task_completed()
+                self._task_completed();
                 return
-
             target_waypoint = path[self.current_corridor_path_index]
-
-            # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Following corridor. Current_pos: {self.pos}, Target_waypoint: {target_waypoint}, Index: {self.current_corridor_path_index}/{len(path)-1}")
-
             if self.pos == target_waypoint:
                 self.current_corridor_path_index += 1
-                # Überprüfung, ob der Pfad nach Inkrementierung abgeschlossen ist, erfolgt am Anfang des nächsten Aufrufs dieses Zustands
             else:
-                # Es ist möglich, dass _move_towards das Ziel nicht in einem Schritt erreicht.
-                # Der Worker versucht einfach weiter, sich dem aktuellen target_waypoint zu nähern.
                 self._move_towards(target_waypoint)
-                # Wenn _move_towards das Ziel nicht erreichen kann (blockiert), bleibt der Agent stecken.
-                # Eine zusätzliche Logik zur Fehlerbehandlung bei blockierten Pfaden könnte hier nötig sein.
-                # Z.B. wenn self.pos sich nach mehreren Versuchen nicht ändert, Task als fehlgeschlagen melden.
-                # Fürs Erste belassen wir es bei der einfachen Bewegung.
-
-        if previous_state != self.state and self.state not in ["IDLE", "AWAITING_TASK"]:
-            pass  # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): State change {previous_state} -> {self.state}")
 
     def set_task(self, task_details):
+        """
+        Nimmt eine neue Aufgabe vom Supervisor entgegen und initialisiert den Worker-Zustand.
+        Kann jetzt den neuen Typ 'execute_tour' verarbeiten.
+        """
         self.current_task = task_details
-        # Zurücksetzen von aufgabenspezifischen Attributen
-        self.current_path_to_explore_index = 0  # Für 'explore_area'
-        self.local_exploration_steps_done = 0  # Für 'explore_area'
-        self.is_current_task_initial_hotspot = self.current_task.get('is_initial_hotspot_task',
-                                                                     False)  # Für 'explore_area'
+        task_type = self.current_task.get('type')
+        log_target_info = "N/A"
 
-        # Zurücksetzen/Initialisieren für Korridor-Aufgaben
+        # Reset aller aufgabenspezifischen Attribute
+        self.current_path_to_explore_index = 0
+        self.local_exploration_steps_done = 0
+        self.is_current_task_initial_hotspot = False
         self.current_corridor_path = []
         self.current_corridor_path_index = 0
+        self.current_tour_steps = []
+        self.current_tour_step_index = 0
 
-        # Die alten Stripe-Attribute werden nicht mehr direkt für die neue Korridorlogik benötigt,
-        # aber das Zurücksetzen schadet nicht. self.stripe_steps_taken könnte für die Korridorlänge wiederverwendet werden,
-        # aber wir verwenden jetzt self.current_corridor_path_index.
-        self.stripe_steps_taken = 0
-        self.current_stripe_direction = None
+        # Task-spezifische Initialisierung
+        if task_type == 'execute_tour':
+            self.state = "EXECUTING_TOUR"
+            self.current_tour_steps = self.current_task.get('tour_steps', [])
+            self.current_tour_step_index = 0
+            log_target_info = f"Tour mit {len(self.current_tour_steps)} Schritten."
+            if not self.current_tour_steps:
+                self._task_failed_or_issue("tour_task_empty_steps")
 
-        task_type = self.current_task.get('type')
-        log_target_info = "N/A"  # Für die Log-Ausgabe
-
-        if task_type == 'collect_resource':
+        elif task_type == 'collect_resource':
             self.state = "MOVING_TO_COLLECT_TARGET"
             log_target_info = f"Resource at {self.current_task.get('target_pos')}"
+
         elif task_type == 'explore_area':
             if self.current_task.get('path_to_explore'):
                 self.state = "MOVING_TO_EXPLORE_ROUTE_STEP"
+                self.is_current_task_initial_hotspot = self.current_task.get('is_initial_hotspot_task', False)
                 log_target_info = f"Area at {self.current_task.get('path_to_explore')[0]}"
             else:
                 self._task_failed_or_issue("explore_task_missing_path")
-                log_target_info = "Error: Missing path for explore_area"
-        elif task_type == 'explore_corridor':  # NEUER TASK TYP
+
+        elif task_type == 'explore_corridor':
             entry_pos = self.current_task.get('entry_pos')
-            self.current_corridor_path = self.current_task.get('corridor_path', [])  # Pfad speichern
+            self.current_corridor_path = self.current_task.get('corridor_path', [])
             if entry_pos and self.current_corridor_path:
                 self.state = "MOVING_TO_CORRIDOR_ENTRY"
-                log_target_info = f"Corridor entry {entry_pos}, path len {len(self.current_corridor_path)}"
+                log_target_info = f"Corridor entry {entry_pos}"
             else:
-                missing_info = []
-                if not entry_pos: missing_info.append("entry_pos")
-                if not self.current_corridor_path: missing_info.append("corridor_path")
-                self._task_failed_or_issue(f"corridor_task_missing_{'_'.join(missing_info)}")
-                log_target_info = f"Error: Missing info for explore_corridor ({', '.join(missing_info)})"
+                self._task_failed_or_issue("corridor_task_missing_info")
+
         else:
-            # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): ERROR - Unknown task type: {task_type}")
             self.state = "IDLE"
             log_target_info = f"Error: Unknown task type {task_type}"
 
-        # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): SET_TASK - ID: {self.current_task.get('task_id')}, Type: {task_type}, TargetInfo: {log_target_info}, IsHotspot: {self.is_current_task_initial_hotspot}")
-
     def _report_and_request_new_task(self):
-        # Unverändert
         if self.pos != self.supervisor_home_pos:
             if self.state != "MOVING_TO_SUPERVISOR": self.state = "MOVING_TO_SUPERVISOR"
             return
+
+        # HIER PASSIERT DIE DATENÜBERGABE
         report_data = {
             'status': 'IDLE_AT_SUPERVISOR', 'current_pos': self.pos,
             'inventory': self.inventory_slot,
-            'map_segment_updates': self.newly_observed_map_segment.copy()
+            'map_segment_updates': self.newly_observed_map_segment.copy()  # Sendet alle gesammelten Daten
         }
         self.model.submit_report_to_supervisor(self.unique_id, 'status_and_map_update', report_data)
+
+        # HIER WERDEN DIE DATEN NACH DER ÜBERGABE GELÖSCHT
         self.newly_observed_map_segment.clear()
+
         new_task = self.model.request_task_from_supervisor(self.unique_id)
         if new_task:
             self.set_task(new_task)
@@ -310,49 +332,47 @@ class WorkerAgent(mesa.Agent):
             self.state = "AWAITING_TASK"
 
     def _task_completed(self):
-        # Unverändert bzgl. Reset der allgemeinen Attribute
-        task_id_log = self.current_task.get('task_id', 'N/A') if self.current_task else 'N/A'
-        # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Task {task_id_log} COMPLETED. Reporting.")
-        report_data = {
-            'status': 'TASK_COMPLETED', 'task_id': task_id_log, 'current_pos': self.pos,
-            'inventory': self.inventory_slot, 'map_segment_updates': self.newly_observed_map_segment.copy()
-        }
-        self.model.submit_report_to_supervisor(self.unique_id, 'task_feedback', report_data)
-        self.newly_observed_map_segment.clear();
-        self.current_task = None;
-        # Reset für explore_area
+        """
+        Beendet eine Aufgabe und leitet die Rückkehr zum Supervisor ein.
+        Es wird KEIN Bericht mehr vom Feld aus gesendet.
+        Die gesammelten Kartendaten bleiben für die spätere Ablieferung erhalten.
+        """
+        # Die gesamte Berichtslogik wird hier entfernt.
+        # self.model.submit_report_to_supervisor(...) WIRD HIER NICHT MEHR AUFGERUFEN.
+
+        # Reset der aufgabenspezifischen Attribute
+        self.current_task = None
         self.current_path_to_explore_index = 0
-        self.local_exploration_steps_done = 0;
+        self.local_exploration_steps_done = 0
         self.is_current_task_initial_hotspot = False
-        # Reset für Korridor (und ehemals Stripe)
-        self.stripe_steps_taken = 0;
-        self.current_stripe_direction = None
         self.current_corridor_path = []
         self.current_corridor_path_index = 0
+        self.current_tour_steps = []
+        self.current_tour_step_index = 0
 
+        # Der Worker weiß, dass er seine Aufgabe erfüllt hat und kehrt nun zurück.
         self.state = "MOVING_TO_SUPERVISOR"
 
     def _task_failed_or_issue(self, reason="unknown"):
-        # Unverändert bzgl. Reset der allgemeinen Attribute
-        task_id_log = self.current_task.get('task_id', 'N/A') if self.current_task else 'N/A'
-        # print(f"[W_AGENT {self.display_id}] (Step {self.model.steps}): Task {task_id_log} FAILED/Issue. Reason: {reason}. Reporting.")
-        report_data = {
-            'status': 'TASK_FAILED', 'task_id': task_id_log, 'reason': reason, 'current_pos': self.pos,
-            'map_segment_updates': self.newly_observed_map_segment.copy()}
-        self.model.submit_report_to_supervisor(self.unique_id, 'task_feedback', report_data)
-        self.newly_observed_map_segment.clear();
-        self.current_task = None;
-        # Reset für explore_area
+        """
+        Beendet eine fehlgeschlagene Aufgabe und leitet die Rückkehr ein.
+        Es wird KEIN Bericht mehr vom Feld aus gesendet.
+        """
+        # Die gesamte Berichtslogik wird hier entfernt.
+        # self.model.submit_report_to_supervisor(...) WIRD HIER NICHT MEHR AUFGERUFEN.
+
+        # Reset der aufgabenspezifischen Attribute
+        self.current_task = None
         self.current_path_to_explore_index = 0
-        self.local_exploration_steps_done = 0;
+        self.local_exploration_steps_done = 0
         self.is_current_task_initial_hotspot = False
-        # Reset für Korridor (und ehemals Stripe)
-        self.stripe_steps_taken = 0;
-        self.current_stripe_direction = None
         self.current_corridor_path = []
         self.current_corridor_path_index = 0
+        self.current_tour_steps = []
+        self.current_tour_step_index = 0
 
-        if self.inventory_slot:  # Wenn er etwas im Inventar hat, soll er es zur Basis bringen
+        # Entscheide, wohin als Nächstes gegangen wird.
+        if self.inventory_slot:
             self.state = "MOVING_TO_BASE_FOR_TASK_DELIVERY"
         else:
             self.state = "MOVING_TO_SUPERVISOR"
