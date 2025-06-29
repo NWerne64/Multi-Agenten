@@ -219,7 +219,7 @@ def run_simulation():
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("Age of Empires Lite - Kollaborationsstrategien")
 
-    CHOSEN_STRATEGY = ("supervisor") # decentralized
+    CHOSEN_STRATEGY = ("decentralized") # decentralized supervisor
     num_agents_for_run = 4
     vision_for_run = 2
 

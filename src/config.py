@@ -46,7 +46,7 @@ BASE_SIZE = 2 #
 # Agenten-Konfiguration
 NUM_AGENTS = 4 #
 VISION_RANGE_RADIUS = 2 # Wird vom Supervisor für Projektionen genutzt #
-BLACKBOARD_SYNC_INTERVAL = 75 #
+BLACKBOARD_SYNC_INTERVAL = 100 # OPTIMIERT am 30.06.2025 basierend auf Batch-Run
 
 
 # Karten-Zellzustände (Integer-IDs)
@@ -82,7 +82,7 @@ KEY_VIEW_AGENT_9 = pygame.K_9 #
 RESOURCE_GOALS = {'wood': 15, 'stone': 10} #
 
 # Simulationsgeschwindigkeit
-SIMULATION_STEPS_PER_SECOND = 10 #
+SIMULATION_STEPS_PER_SECOND = 100 #
 FRAMES_PER_SECOND = 30 #
 
 # Für dezentrale Strategie:

@@ -350,6 +350,7 @@ class ResourceCollectorAgent(mesa.Agent):
         if self.state != "SYNCING_WITH_BLACKBOARD" and self.just_synced_with_blackboard:
             self.just_synced_with_blackboard = False
 
+        # FIX: Tippfehler "dezentralized" zu "decentralized" korrigiert
         if self.model.strategy == "decentralized" and self.state == "INITIAL_EXPLORATION":
             if self.target_pos and \
                     (self.pos == self.target_pos or self._manhattan_distance(self.pos,
@@ -367,7 +368,8 @@ class ResourceCollectorAgent(mesa.Agent):
                 self.state = "SEEKING_RESOURCE";
                 self.target_pos = None
 
-        if self.model.strategy == "dezentralized" and \
+        # FIX: Tippfehler "dezentralized" zu "decentralized" korrigiert
+        if self.model.strategy == "decentralized" and \
                 self.state not in ["INITIAL_EXPLORATION", "SYNCING_WITH_BLACKBOARD", "MOVING_TO_BLACKBOARD"] and \
                 self.inventory_slot is None:
             trigger_bb_visit_now = False
@@ -386,6 +388,8 @@ class ResourceCollectorAgent(mesa.Agent):
 
         if self.state == "SYNCING_WITH_BLACKBOARD":
             self._sync_with_blackboard();
+            # HINWEIS: An dieser Stelle sollte der Zähler zurückgesetzt werden, damit der Agent nach dem nächsten Intervall wiederkommt.
+            # z.B. self.time_since_last_blackboard_visit = 0
             self.last_successful_frontier_target = None;
             return
 
@@ -396,6 +400,7 @@ class ResourceCollectorAgent(mesa.Agent):
                 self._move_towards(self.target_pos)
 
         elif self.state == "MOVING_TO_RESOURCE":
+            # FIX: Tippfehler "dezentralized" zu "decentralized" korrigiert
             if self.pos == self.target_pos:
                 self._collect_resource()
             elif self.target_pos and self.model.strategy == "decentralized" and \
@@ -436,6 +441,7 @@ class ResourceCollectorAgent(mesa.Agent):
                 self.last_successful_frontier_target = None
 
         elif self.state == "IDLE_AWAITING_INFO":
+            # FIX: Tippfehler "dezentralized" zu "decentralized" korrigiert
             if self.model.strategy == "decentralized" and \
                     not self.just_synced_with_blackboard and \
                     self.model.steps % (

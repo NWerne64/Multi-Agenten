@@ -21,7 +21,7 @@ if __name__ == '__main__':
         model_cls=AoELiteModel,
         parameters=fixed_params,
         iterations=100,
-        max_steps=2500,
+        max_steps=4000,
         display_progress=True
     )
     print("Batch-Run abgeschlossen.")
@@ -57,4 +57,4 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"\nFehler beim Speichern der CSV-Datei: {e}")
     else:
-        print("\nKeine der Simulationen hat das Ziel innerhalb des max_steps-Limits von 2500 erreicht.")
+        print("\nKeine der Simulationen hat das Ziel innerhalb des max_steps-Limits von 4000 erreicht.")

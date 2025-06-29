@@ -124,15 +124,21 @@ class AoELiteModel(mesa.Model):
             for i in range(self.num_agents_val):
                 initial_anchor = None
                 spawn_pos = None
-                if i < len(self.exploration_anchor_points):
-                    spawn_pos = self._get_valid_spawn_pos(self.exploration_anchor_points[i])
-                    initial_anchor = self.exploration_anchor_points[i]
-                elif self.base_coords_list:
-                    spawn_pos = self._get_valid_spawn_pos(self.base_coords_list[i % len(self.base_coords_list)])
+
+                # Schritt 1: Spawnpunkt immer an der Basis festlegen
+                if self.base_coords_list:
+                    # Wähle eine zufällige Position innerhalb oder nahe der Basis
+                    spawn_pos = self._get_valid_spawn_pos(self.random.choice(self.base_coords_list))
                 else:
-                    print(f"Warnung: Dezentraler Agent {i} startet zufällig.")
+                    # Fallback, falls die Basis aus irgendeinem Grund nicht existiert
+                    print(f"Warnung: Dezentraler Agent {i} startet zufällig, da keine Basis gefunden wurde.")
                     spawn_pos = self._get_valid_spawn_pos()
 
+                # Schritt 2: Einen Ankerpunkt als Ziel zuweisen, falls noch einer verfügbar ist
+                if i < len(self.exploration_anchor_points):
+                    initial_anchor = self.exploration_anchor_points[i]
+
+                # Schritt 3: Agenten mit dem Spawnpunkt an der Basis und dem Ziel-Ankerpunkt erstellen
                 agent = ResourceCollectorAgent(model=self, initial_anchor_point=initial_anchor,
                                                creation_id_for_display=i)
                 if spawn_pos:
@@ -153,7 +159,6 @@ class AoELiteModel(mesa.Model):
         print(f"Modell initialisiert. Strategie: {self.strategy}, Agenten: {self.num_agents_val}")
 
     def _get_valid_spawn_pos(self, preferred_pos=None):
-        # ... (Logik bleibt gleich)
         if preferred_pos:
             if self.grid.is_cell_empty(preferred_pos):
                 return preferred_pos
