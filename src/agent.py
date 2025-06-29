@@ -215,7 +215,8 @@ class ResourceCollectorAgent(mesa.Agent):
             self.claimed_resource_pos = None
 
     def _decide_target_and_state(self):
-        if not self.model.simulation_running:
+        # KORREKTUR: "self.model.running" statt "self.model.simulation_running"
+        if not self.model.running:
             self.state = "IDLE_AWAITING_SIM_END";
             self._release_my_claim();
             self.last_successful_frontier_target = None;
@@ -338,7 +339,8 @@ class ResourceCollectorAgent(mesa.Agent):
             self.target_pos = None
 
     def step(self):
-        if not self.model.simulation_running:
+        # KORREKTUR: "self.model.running" statt "self.model.simulation_running"
+        if not self.model.running:
             self.state = "IDLE_AWAITING_SIM_END";
             return
 
@@ -358,11 +360,14 @@ class ResourceCollectorAgent(mesa.Agent):
                 self.state = "SEEKING_RESOURCE";
                 self.target_pos = None
             elif self.target_pos:
-                self._move_towards(self.target_pos); return
+                self._move_towards(self.target_pos);
+                return
             else:
-                self.has_reached_initial_anchor = True; self.state = "SEEKING_RESOURCE"; self.target_pos = None
+                self.has_reached_initial_anchor = True;
+                self.state = "SEEKING_RESOURCE";
+                self.target_pos = None
 
-        if self.model.strategy == "decentralized" and \
+        if self.model.strategy == "dezentralized" and \
                 self.state not in ["INITIAL_EXPLORATION", "SYNCING_WITH_BLACKBOARD", "MOVING_TO_BLACKBOARD"] and \
                 self.inventory_slot is None:
             trigger_bb_visit_now = False
@@ -375,7 +380,8 @@ class ResourceCollectorAgent(mesa.Agent):
                 if self.pos in self.model.blackboard_coords_list:
                     self.state = "SYNCING_WITH_BLACKBOARD"
                 else:
-                    self.state = "MOVING_TO_BLACKBOARD"; self.target_pos = self.random.choice(
+                    self.state = "MOVING_TO_BLACKBOARD";
+                    self.target_pos = self.random.choice(
                         self.model.blackboard_coords_list)
 
         if self.state == "SYNCING_WITH_BLACKBOARD":
@@ -397,11 +403,15 @@ class ResourceCollectorAgent(mesa.Agent):
                      self.known_map[self.target_pos[0], self.target_pos[1]] == STONE_SEEN):
                 self._move_towards(self.target_pos)
             else:
-                self._release_my_claim(); self.state = "SEEKING_RESOURCE"; self.target_pos = None
+                self._release_my_claim();
+                self.state = "SEEKING_RESOURCE";
+                self.target_pos = None
 
         elif self.state == "MOVING_TO_FRONTIER":
             if self.pos == self.target_pos:
-                self.last_successful_frontier_target = self.pos; self.state = "SEEKING_RESOURCE"; self.target_pos = None
+                self.last_successful_frontier_target = self.pos;
+                self.state = "SEEKING_RESOURCE";
+                self.target_pos = None
             elif self.target_pos:
                 self._move_towards(self.target_pos)
             else:
@@ -413,7 +423,8 @@ class ResourceCollectorAgent(mesa.Agent):
             elif self.target_pos:
                 self._move_towards(self.target_pos)
             else:
-                self.state = "SEEKING_RESOURCE"; self.last_successful_frontier_target = None
+                self.state = "SEEKING_RESOURCE";
+                self.last_successful_frontier_target = None
 
         elif self.state == "MOVING_TO_BASE":
             if self.pos in self.model.base_coords_list:
@@ -421,7 +432,8 @@ class ResourceCollectorAgent(mesa.Agent):
             elif self.target_pos:
                 self._move_towards(self.target_pos)
             else:
-                self.state = "SEEKING_RESOURCE"; self.last_successful_frontier_target = None
+                self.state = "SEEKING_RESOURCE";
+                self.last_successful_frontier_target = None
 
         elif self.state == "IDLE_AWAITING_INFO":
             if self.model.strategy == "decentralized" and \

@@ -82,7 +82,7 @@ KEY_VIEW_AGENT_9 = pygame.K_9 #
 RESOURCE_GOALS = {'wood': 15, 'stone': 10} #
 
 # Simulationsgeschwindigkeit
-SIMULATION_STEPS_PER_SECOND = 100 #
+SIMULATION_STEPS_PER_SECOND = 10 #
 FRAMES_PER_SECOND = 30 #
 
 # Für dezentrale Strategie:

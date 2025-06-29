@@ -6,7 +6,7 @@ from src.config import NUM_AGENTS, MIN_EXPLORE_TARGET_SEPARATION
 
 # 1. Definiere die festen Parameter für die Simulation.
 fixed_params = {
-    "strategy": "supervisor",
+    "strategy": "decentralized",
     "num_agents_val": NUM_AGENTS,
     "min_explore_target_separation_cfg": MIN_EXPLORE_TARGET_SEPARATION
 }
@@ -20,7 +20,7 @@ if __name__ == '__main__':
     results_list = batch_run(
         model_cls=AoELiteModel,
         parameters=fixed_params,
-        iterations=10,
+        iterations=100,
         max_steps=2500,
         display_progress=True
     )

@@ -1,5 +1,6 @@
 # src/model.py
 import mesa
+from mesa.datacollection import DataCollector
 import numpy as np
 from src.config import (
     GRID_WIDTH, GRID_HEIGHT, NUM_AGENTS,
@@ -41,7 +42,7 @@ class AoELiteModel(mesa.Model):
                  # oder über globale Konstanten direkt im SupervisorAgent geladen werden:
                  supervisor_initial_exploration_hotspots_cfg=SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS,
                  min_explore_target_separation_cfg=MIN_EXPLORE_TARGET_SEPARATION,
-                 min_unknown_ratio_for_continued_exploration_cfg=MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION
+                 min_unknown_ratio_for_continued_exploration_cfg=MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION,
                  ):
         super().__init__()
 
@@ -49,22 +50,18 @@ class AoELiteModel(mesa.Model):
         self.SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS_val = supervisor_initial_exploration_hotspots_cfg
         self.MIN_EXPLORE_TARGET_SEPARATION_val = min_explore_target_separation_cfg
         self.MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION_val = min_unknown_ratio_for_continued_exploration_cfg
-        # Die anderen spezifischen Supervisor-Heuristik-Parameter (EARLY_EXPLORATION_WEIGHT etc.)
-        # wurden entfernt, da der Supervisor sie nun intern verwaltet oder sie nicht mehr benötigt.
 
         self.grid_width_val = width
         self.grid_height_val = height
         self.num_agents_val = num_agents_val
         self.strategy = strategy
 
-        self.agent_vision_radius_val = agent_vision_radius  # Wichtig für Worker und Supervisor-Projektion
+        self.agent_vision_radius_val = agent_vision_radius
         self.blackboard_sync_interval_val = blackboard_sync_interval
         self.num_wood_patches_val = num_wood_patches
         self.num_stone_patches_val = num_stone_patches
         self.resource_goals = RESOURCE_GOALS.copy()
-        self.anchor_reached_threshold_val = anchor_reached_threshold  # Für ResourceCollectorAgent
-
-        # Zellzustände (werden nicht als _val gespeichert, da sie direkt aus config importiert werden)
+        self.anchor_reached_threshold_val = anchor_reached_threshold
 
         self.grid = mesa.space.MultiGrid(self.grid_width_val, self.grid_height_val, torus=False)
 
@@ -75,7 +72,7 @@ class AoELiteModel(mesa.Model):
         if self.base_coords_list:
             base_anchor_x = self.base_coords_list[0][0]
             base_anchor_y = self.base_coords_list[0][1]
-            sup_x = base_anchor_x - 2  # Position des Supervisors relativ zur Basis
+            sup_x = base_anchor_x - 2
             sup_y = base_anchor_y
             self.supervisor_home_pos = (max(0, min(sup_x, self.grid_width_val - 1)),
                                         max(0, min(sup_y, self.grid_height_val - 1)))
@@ -84,15 +81,13 @@ class AoELiteModel(mesa.Model):
             abs_sh_y = int(self.grid_height_val * supervisor_home_pos_ratio[1])
             self.supervisor_home_pos = (max(0, min(abs_sh_x, self.grid_width_val - 1)),
                                         max(0, min(abs_sh_y, self.grid_height_val - 1)))
-            print(
-                f"WARNUNG: Basis nicht gefunden/platziert, Supervisor startet bei Fallback-Position {self.supervisor_home_pos}")
+            print(f"WARNUNG: Basis nicht gefunden, Supervisor startet bei Fallback-Position {self.supervisor_home_pos}")
 
-        self.supervisor_agent_instance = None  # Wird nur bei Supervisor-Strategie instanziiert
+        self.supervisor_agent_instance = None
 
-        # Für dezentrale Strategie
         self.blackboard_coords_list = []
         self.blackboard_map = np.full((self.grid_width_val, self.grid_height_val), UNKNOWN, dtype=int)
-        self.resource_claims = {}  # AgentID: pos
+        self.resource_claims = {}
         if self.strategy == "decentralized":
             self._place_blackboard_object(self.grid_width_val, self.grid_height_val)
 
@@ -100,7 +95,7 @@ class AoELiteModel(mesa.Model):
         if self.strategy == "supervisor":
             self.occupied_for_initial_resource_placement.add(self.supervisor_home_pos)
 
-        self.resources_on_grid = {}  # pos: {'type': 'wood'/'stone'}
+        self.resources_on_grid = {}
         self._place_all_resources(self.grid_width_val, self.grid_height_val)
         self.base_resources_collected = {'wood': 0, 'stone': 0}
 
@@ -117,8 +112,7 @@ class AoELiteModel(mesa.Model):
                 self.grid.place_agent(worker, spawn_pos)
                 print(f"Worker-Agent {i} erstellt bei {spawn_pos}")
         else:  # Dezentrale Strategie
-            self.exploration_anchor_points = []  # Für ResourceCollectorAgent
-            # INITIAL_EXPLORATION_ANCHORS wird direkt aus config.py in dieser Schleife verwendet
+            self.exploration_anchor_points = []
             if INITIAL_EXPLORATION_ANCHORS:
                 for rel_x, rel_y in INITIAL_EXPLORATION_ANCHORS:
                     abs_x = int(self.grid_width_val * rel_x)
@@ -130,16 +124,13 @@ class AoELiteModel(mesa.Model):
             for i in range(self.num_agents_val):
                 initial_anchor = None
                 spawn_pos = None
-                # Versuche, Agenten an verschiedenen Basispunkten zu spawnen, falls Basis groß genug
-                # oder nutze exploration_anchor_points für Startpositionen oder als erste Ziele
                 if i < len(self.exploration_anchor_points):
-                    spawn_pos = self._get_valid_spawn_pos(
-                        self.exploration_anchor_points[i])  # Spawn in der Nähe des Ankers
+                    spawn_pos = self._get_valid_spawn_pos(self.exploration_anchor_points[i])
                     initial_anchor = self.exploration_anchor_points[i]
-                elif self.base_coords_list:  # Fallback: Spawn an der Basis
+                elif self.base_coords_list:
                     spawn_pos = self._get_valid_spawn_pos(self.base_coords_list[i % len(self.base_coords_list)])
-                else:  # Absoluter Fallback
-                    print(f"Warnung: Dezentraler Agent {i} startet zufällig ohne Anker/festen Basispunkt.")
+                else:
+                    print(f"Warnung: Dezentraler Agent {i} startet zufällig.")
                     spawn_pos = self._get_valid_spawn_pos()
 
                 agent = ResourceCollectorAgent(model=self, initial_anchor_point=initial_anchor,
@@ -148,11 +139,17 @@ class AoELiteModel(mesa.Model):
                     self.grid.place_agent(agent, spawn_pos)
                     print(f"Dezentraler Agent {i} erstellt bei {spawn_pos} mit Anker {initial_anchor}")
                 else:
-                    # Sollte durch _get_valid_spawn_pos Fallback nicht passieren
                     print(f"FEHLER: Konnte keinen Spawnpunkt für dezentralen Agent {i} finden.")
 
-        self.simulation_running = True
-        self.completion_step = -1
+        self.completion_step = -1  # Initialwert für den DataCollector
+        self.datacollector = DataCollector(
+            model_reporters={
+                "CompletionSteps": "completion_step",
+                "CollectedWood": lambda m: m.base_resources_collected.get('wood', 0),
+                "CollectedStone": lambda m: m.base_resources_collected.get('stone', 0),
+            }
+        )
+
         print(f"Modell initialisiert. Strategie: {self.strategy}, Agenten: {self.num_agents_val}")
 
     def _get_valid_spawn_pos(self, preferred_pos=None):
@@ -333,29 +330,34 @@ class AoELiteModel(mesa.Model):
         return None
 
     def step(self):
-        if not self.simulation_running:
+        # Wenn die Simulation nicht mehr läuft (z.B. im vorherigen Schritt beendet), nichts tun.
+        if not self.running:
             return
 
+        # 1. Agenten aktivieren
         if self.strategy == "supervisor":
             if self.supervisor_agent_instance:
                 self.supervisor_agent_instance.step()
-            # Worker Agents werden über self.agents.shuffle_do("step") aktiviert
-            # aber da der Supervisor zuerst handeln soll, ist diese explizite Reihenfolge gut.
             worker_agents = self.agents.select(lambda agent: isinstance(agent, WorkerAgent))
-            if worker_agents:  # Stellt sicher, dass es Worker gibt
-                worker_agents.shuffle_do("step")  # Aktiviert alle Worker in zufälliger Reihenfolge
+            if worker_agents:
+                worker_agents.shuffle_do("step")
         else:  # Dezentrale Strategie
-            # Alle Agenten (ResourceCollectorAgent) in zufälliger Reihenfolge aktivieren
             self.agents.shuffle_do("step")
 
-        # Prüfe, ob Ziele erreicht wurden
+        # 2. Prüfen, ob die Ziele in diesem Schritt erreicht wurden
         goals_met_count = 0
         for resource_type, target_amount in self.resource_goals.items():
             if self.base_resources_collected.get(resource_type, 0) >= target_amount:
                 goals_met_count += 1
 
-        if goals_met_count == len(self.resource_goals) and self.simulation_running:
-            self.simulation_running = False
-            self.completion_step = self.steps  # Mesa zählt Schritte in self.steps
+        # Nur wenn die Ziele genau in diesem Schritt erreicht wurden:
+        if goals_met_count == len(self.resource_goals):
+            # Setze den finalen Schritt im DataCollector-Bericht
+            self.completion_step = self.steps
+            # Stoppe die Simulation für den batch_run, indem du die korrekte Variable setzt
+            self.running = False
             print(f"----- ZIELE ERREICHT in {self.completion_step} Schritten! (Strategie: {self.strategy}) -----")
             print(f"Gesammelte Ressourcen: {self.base_resources_collected}")
+
+        # 3. Daten für den aktuellen Schritt sammeln (wichtig: NACH der Zustandsprüfung)
+        self.datacollector.collect(self)
