@@ -18,29 +18,40 @@ class WorkerAgent(mesa.Agent):
         self.newly_observed_map_segment = {}
         self.inventory_slot = None
         self.supervisor_home_pos = supervisor_home_pos
-        self.vision_radius = self.model.agent_vision_radius_val  #
-        self.worker_internal_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN, dtype=int)  #
+        self.vision_radius = self.model.agent_vision_radius_val
+        self.worker_internal_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN, dtype=int)
 
-        # Für 'explore_area' Aufgaben
-        self.current_path_to_explore_index = 0  #
-        self.local_exploration_steps_done = 0  #
-        self.local_exploration_max_steps = self.model.random.randint(3, 6)  #
-        self.is_current_task_initial_hotspot = False  #
-
-        # Attribute für Kaskaden-Exploration (derzeit nicht aktiv genutzt)
+        # Alle aufgabenspezifischen Attribute werden hier nur initialisiert
+        self.current_path_to_explore_index = 0
+        self.local_exploration_steps_done = 0
+        self.local_exploration_max_steps = self.model.random.randint(3, 6)
+        self.is_current_task_initial_hotspot = False
         self.chained_sortie_steps_taken = 0
         self.chained_frontiers_visited_count = 0
         self.current_chained_target_pos = None
         self.is_on_chained_exploration_sortie = False
-
-        # Attribute für Stripe Exploration (jetzt Korridor Exploration)
-        self.stripe_steps_taken = 0  # Wird jetzt als Zähler für Korridor-Schritte wiederverwendet
-        self.current_stripe_direction = None  # Nicht mehr primär genutzt für Korridore
-        self.DEFAULT_STRIPE_LENGTH_val = getattr(self.model, 'DEFAULT_STRIPE_LENGTH_val', 20)  #
-
-        # NEU: Für 'explore_corridor' Aufgaben
+        self.stripe_steps_taken = 0
+        self.current_stripe_direction = None
+        self.DEFAULT_STRIPE_LENGTH_val = getattr(self.model, 'DEFAULT_STRIPE_LENGTH_val', 20)
         self.current_corridor_path = []
         self.current_corridor_path_index = 0
+        # Wichtig: Diese Attribute müssen auch hier initialisiert werden
+        self.current_tour_steps = []
+        self.current_tour_step_index = 0
+
+        # ===================================================================
+        # FINALE LOGIK: Agent bekommt eine Aufgabe und verarbeitet sie selbst
+        # ===================================================================
+        if self.model.supervisor_agent_instance:
+            initial_task = self.model.supervisor_agent_instance.get_initial_task()
+
+            if initial_task:
+                # WICHTIG: Rufe die eigene 'set_task' Methode auf.
+                # Sie enthält die Logik, um den korrekten Zustand zu setzen.
+                self.set_task(initial_task)
+
+                # Dem Supervisor mitteilen, dass die Aufgabe angenommen wurde.
+                self.model.supervisor_agent_instance.assigned_tasks[self.unique_id] = self.current_task
 
     def _manhattan_distance(self, pos1, pos2):
         if pos1 is None or pos2 is None: return float('inf')

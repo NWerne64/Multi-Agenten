@@ -25,64 +25,87 @@ class SupervisorAgent(mesa.Agent):
     DEFAULT_CORRIDOR_LENGTH = 30
     CORRIDOR_ATTEMPT_THRESHOLD = 2
 
-    def __init__(self, model, home_pos, role_id_for_display="supervisor_0"):  #
-        super().__init__(model=model)  #
-        self.role_id = role_id_for_display  #
-        self.home_pos = home_pos  #
+    def __init__(self, model, home_pos, role_id_for_display="supervisor_0"):
+        super().__init__(model=model)
+        self.role_id = role_id_for_display
+        self.home_pos = home_pos
 
-        self.supervisor_known_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN, dtype=int)  #
-        self.supervisor_exploration_logistics_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN,  #
+        self.supervisor_known_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN, dtype=int)
+        self.supervisor_exploration_logistics_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN,
                                                             dtype=int)
 
-        init_cells = [self.home_pos] + model.base_coords_list  #
-        for pos in init_cells:  #
-            if 0 <= pos[0] < self.model.grid_width_val and 0 <= pos[1] < self.model.grid_height_val:  #
-                is_base = pos in model.base_coords_list  #
-                self.supervisor_known_map[pos[0], pos[1]] = BASE_KNOWN if is_base else EMPTY_EXPLORED  #
-                self.supervisor_exploration_logistics_map[pos[0], pos[1]] = SUPERVISOR_LOGISTICS_KNOWN_PASSABLE  #
+        init_cells = [self.home_pos] + model.base_coords_list
+        for pos in init_cells:
+            if 0 <= pos[0] < self.model.grid_width_val and 0 <= pos[1] < self.model.grid_height_val:
+                is_base = pos in model.base_coords_list
+                self.supervisor_known_map[pos[0], pos[1]] = BASE_KNOWN if is_base else EMPTY_EXPLORED
+                self.supervisor_exploration_logistics_map[pos[0], pos[1]] = SUPERVISOR_LOGISTICS_KNOWN_PASSABLE
 
-        self.worker_status = {}  #
-        self.task_queue = []  #
-        self.assigned_tasks = {}  #
-        self.resource_goals = self.model.resource_goals.copy()  #
-        self._pending_worker_reports = []  #
-        self._tasks_to_assign_to_worker = {}  #
+        self.worker_status = {}
+        self.task_queue = []
+        self.assigned_tasks = {}
+        self.resource_goals = self.model.resource_goals.copy()
+        self._pending_worker_reports = []
+        self._tasks_to_assign_to_worker = {}
 
-        self.max_new_collect_tasks_per_planning = self.model.num_agents_val  #
-        self.max_new_explore_tasks_per_planning = self.model.num_agents_val  #
+        self.max_new_collect_tasks_per_planning = self.model.num_agents_val
+        self.max_new_explore_tasks_per_planning = self.model.num_agents_val
 
-        self.pending_exploration_targets = set()  #
-        self.task_id_counter = itertools.count(1)  #
+        self.pending_exploration_targets = set()
+        self.task_id_counter = itertools.count(1)
 
         self.MIN_EXPLORE_TARGET_SEPARATION_val = getattr(self.model, 'MIN_EXPLORE_TARGET_SEPARATION_val',
-                                                         MIN_EXPLORE_TARGET_SEPARATION)  #
+                                                         MIN_EXPLORE_TARGET_SEPARATION)
         self.min_unknown_ratio_for_continued_exploration_val = getattr(self.model,
                                                                        'MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION_val',
-                                                                       MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION)  #
-        self.initial_hotspots_abs = []  #
+                                                                       MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION)
+        self.initial_hotspots_abs = []
         hotspots_config = getattr(self.model, 'SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS_val',
-                                  SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS)  #
-        if hotspots_config:  #
-            for rel_x, rel_y in hotspots_config:  #
+                                  SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS)
+        if hotspots_config:
+            for rel_x, rel_y in hotspots_config:
                 abs_x = int(self.model.grid_width_val * rel_x);
-                abs_y = int(self.model.grid_height_val * rel_y)  #
+                abs_y = int(self.model.grid_height_val * rel_y)
                 abs_x = max(0, min(abs_x, self.model.grid_width_val - 1));
-                abs_y = max(0, min(abs_y, self.model.grid_height_val - 1))  #
-                self.initial_hotspots_abs.append((abs_x, abs_y))  #
-        self.model.random.shuffle(self.initial_hotspots_abs)  #
-        self.attempted_hotspots = set()  #
+                abs_y = max(0, min(abs_y, self.model.grid_height_val - 1))
+                self.initial_hotspots_abs.append((abs_x, abs_y))
+        self.model.random.shuffle(self.initial_hotspots_abs)
+        self.attempted_hotspots = set()
 
-        self.total_grid_cells = self.model.grid_width_val * self.model.grid_height_val  #
-        self.initial_hotspot_planning_complete = False  #
-        self.no_normal_target_found_count = 0  #
+        self.total_grid_cells = self.model.grid_width_val * self.model.grid_height_val
+        self.initial_hotspot_planning_complete = False
+        self.no_normal_target_found_count = 0
 
-        self.needs_new_planning = True  #
-        self.max_task_queue_buffer = 4  #
+        self.needs_new_planning = True
+        self.max_task_queue_buffer = 4
 
-        self.active_corridors_viz = {}  # task_id -> {'entry_U':(x,y), 'end_U':(x,y)} #
+        self.active_corridors_viz = {}
 
         print(
-            f"[S_AGENT {self.role_id}] (Init): Supervisor created. MIN_EXPLORE_TARGET_SEPARATION: {self.MIN_EXPLORE_TARGET_SEPARATION_val}, DEFAULT_CORRIDOR_LENGTH: {self.DEFAULT_CORRIDOR_LENGTH}")  #
+            f"[S_AGENT {self.role_id}] (Init): Supervisor created. MIN_EXPLORE_TARGET_SEPARATION: {self.MIN_EXPLORE_TARGET_SEPARATION_val}, DEFAULT_CORRIDOR_LENGTH: {self.DEFAULT_CORRIDOR_LENGTH}")
+
+    def get_initial_task(self):
+        """
+        Erstellt eine 'explore_area'-Aufgabe für einen initialen Hotspot,
+        die mit der set_task-Methode des Workers kompatibel ist.
+        """
+        if self.initial_hotspots_abs:
+            next_hotspot = self.initial_hotspots_abs.pop(0)
+            task_id = next(self.task_id_counter)
+
+            # Erstelle eine Aufgabe, die die 'set_task'-Methode des Workers versteht.
+            # Wir formatieren sie als 'explore_area'-Task.
+            task = {
+                'task_id': task_id,
+                'type': 'explore_area',
+                # 'path_to_explore' muss eine Liste sein, auch wenn sie nur ein Element hat.
+                'path_to_explore': [next_hotspot],
+                'is_initial_hotspot_task': True,  # Wichtiger Flag für den Worker
+                'status': 'assigned'
+            }
+            return task
+
+        return None
 
     def _get_projected_explored_cells(self, target_pos, vision_radius):
         cells_to_mark = set();  #
