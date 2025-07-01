@@ -86,8 +86,8 @@ class SupervisorAgent(mesa.Agent):
 
         self.active_corridors_viz = {}
 
-        print(
-            f"[S_AGENT {self.role_id}] (Init): Supervisor created. MIN_EXPLORE_TARGET_SEPARATION: {self.MIN_EXPLORE_TARGET_SEPARATION_val}, DEFAULT_CORRIDOR_LENGTH: {self.DEFAULT_CORRIDOR_LENGTH}")
+        #print(
+            #f"[S_AGENT {self.role_id}] (Init): Supervisor created. MIN_EXPLORE_TARGET_SEPARATION: {self.MIN_EXPLORE_TARGET_SEPARATION_val}, DEFAULT_CORRIDOR_LENGTH: {self.DEFAULT_CORRIDOR_LENGTH}")
 
     def get_initial_task(self):
         """
@@ -206,7 +206,7 @@ class SupervisorAgent(mesa.Agent):
                     if res_type in self.claimed_resources_by_supervisor and self.claimed_resources_by_supervisor[res_type] > 0:
                         self.claimed_resources_by_supervisor[res_type] -= 1
                         # NEU: Log, wenn eine Ressource als 'beansprucht' freigegeben wird
-                        print(f"[S_AGENT {self.role_id}] - Report: Task {task_id_in_report} for {res_type} {new_worker_state}. Decrementing claimed. Current claimed: {self.claimed_resources_by_supervisor}")
+                        #print(f"[S_AGENT {self.role_id}] - Report: Task {task_id_in_report} for {res_type} {new_worker_state}. Decrementing claimed. Current claimed: {self.claimed_resources_by_supervisor}")
 
 
             if report_caused_significant_map_change:
@@ -295,12 +295,12 @@ class SupervisorAgent(mesa.Agent):
                     self.claimed_resources_by_supervisor[res_type] += 1
 
         # Log zu Beginn der Planungsrunde
-        print(f"[S_AGENT {self.role_id}] - Planning Cycle Start:")
-        print(f"  - Collected: {self.model.base_resources_collected}")
-        print(f"  - Claimed (assigned): {self.claimed_resources_by_supervisor}")
-        print(f"  - Goals: {self.resource_goals}")
+        #print(f"[S_AGENT {self.role_id}] - Planning Cycle Start:")
+        #print(f"  - Collected: {self.model.base_resources_collected}")
+        #print(f"  - Claimed (assigned): {self.claimed_resources_by_supervisor}")
+        #print(f"  - Goals: {self.resource_goals}")
         collect_tasks_in_queue = sum(1 for task in self.task_queue if task.get('type') == 'collect_resource')
-        print(f"  - Collect Tasks in Queue: {collect_tasks_in_queue}")
+        #print(f"  - Collect Tasks in Queue: {collect_tasks_in_queue}")
 
         # Aufgabenwarteschlange bereinigen (self.task_queue)
         new_task_queue = []
@@ -405,8 +405,8 @@ class SupervisorAgent(mesa.Agent):
                 # Der Zähler claimed_resources_by_supervisor wird HIER NICHT inkrementiert.
                 # Dies geschieht erst, wenn die Aufgabe einem Worker zugewiesen wird (in request_task_from_worker).
                 # Log, wenn eine neue Sammelaufgabe zur Warteschlange hinzugefügt wird
-                print(
-                    f"[S_AGENT {self.role_id}] - Added new collect task for {res_type} at {patch_pos} to queue. Current queue len: {len(self.task_queue)}")
+                #print(
+                    #f"[S_AGENT {self.role_id}] - Added new collect task for {res_type} at {patch_pos} to queue. Current queue len: {len(self.task_queue)}")
                 if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
@@ -813,8 +813,8 @@ class SupervisorAgent(mesa.Agent):
                     self.claimed_resources_by_supervisor[res_type] += 1
                 log_target_info = f"Resource at {task.get('target_pos')} (Type: {res_type})"
                 # NEU: Log, wenn eine Ressource als 'beansprucht' markiert wird
-                print(
-                    f"[S_AGENT {self.role_id}] - Assigned task {task['task_id']} ({res_type}) to Worker {worker_id}. Incrementing claimed. Current claimed: {self.claimed_resources_by_supervisor}")
+                #print(
+                    #f"[S_AGENT {self.role_id}] - Assigned task {task['task_id']} ({res_type}) to Worker {worker_id}. Incrementing claimed. Current claimed: {self.claimed_resources_by_supervisor}")
 
 
             elif task_type_assigned == 'execute_tour':

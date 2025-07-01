@@ -92,7 +92,7 @@ INITIAL_EXPLORATION_ANCHORS = [ #
 ANCHOR_REACHED_THRESHOLD_DISTANCE = 5 #
 
 # Für Supervisor-gesteuerte Exploration (vereinfacht)
-MIN_EXPLORE_TARGET_SEPARATION = 20 #
+MIN_EXPLORE_TARGET_SEPARATION = 25 #
 SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS = [ # Beibehalten für initiale Streuung #
     (0.15, 0.15), (0.85, 0.15), #
     (0.15, 0.85), (0.85, 0.85) ] #
