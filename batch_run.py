@@ -6,7 +6,7 @@ from src.config import NUM_AGENTS, MIN_EXPLORE_TARGET_SEPARATION
 
 # 1. Definiere die festen Parameter für die Simulation.
 fixed_params = {
-    "strategy": "decentralized",
+    "strategy": "supervisor",
     "num_agents_val": NUM_AGENTS,
     "min_explore_target_separation_cfg": MIN_EXPLORE_TARGET_SEPARATION
 }
