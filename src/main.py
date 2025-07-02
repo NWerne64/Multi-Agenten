@@ -208,7 +208,6 @@ def draw_view_mode_text(screen, view_mode, selected_agent_idx, model, font, show
 
 
 def run_simulation():
-    # Kleinere Anpassung im Tasten-Handling für Logistikkarte
     pygame.init()
     pygame.font.init()
     try:
@@ -219,13 +218,29 @@ def run_simulation():
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("Age of Empires Lite - Kollaborationsstrategien")
 
-    CHOSEN_STRATEGY = ("supervisor") # decentralized supervisor
+    # --- HIER ANPASSEN ---
+    # Wähle die globale Strategie und den Supervisor-Typ
+    CHOSEN_STRATEGY = "supervisor"  # "supervisor" oder "decentralized"
+
+    # NEU: Wähle hier, welche Supervisor-Implementierung du sehen möchtest
+    # "mixed_strategy" -> Der ursprüngliche Supervisor mit Touren und Korridor-Fallback
+    # "corridor_only"  -> Der neue Supervisor, der nur Korridore plant
+    CHOSEN_SUPERVISOR_TYPE = "corridor_only"
+
     num_agents_for_run = 4
     vision_for_run = 2
 
-    model = AoELiteModel(strategy=CHOSEN_STRATEGY, num_agents_val=num_agents_for_run, agent_vision_radius=vision_for_run)
+    # Übergebe den gewählten Supervisor-Typ an das Modell
+    model = AoELiteModel(
+        strategy=CHOSEN_STRATEGY,
+        supervisor_type=CHOSEN_SUPERVISOR_TYPE,  # NEUER PARAMETER
+        num_agents_val=num_agents_for_run,
+        agent_vision_radius=vision_for_run
+    )
 
-    running_pygame = True; clock = pygame.time.Clock(); time_since_last_model_step = 0
+    running_pygame = True
+    clock = pygame.time.Clock()
+    time_since_last_model_step = 0
     current_view_mode = "SUPERVISOR_VIEW" if CHOSEN_STRATEGY == "supervisor" else "AGENT_VIEW"
     selected_agent_idx_for_view = 0
     show_supervisor_logistics_map = False
@@ -238,15 +253,16 @@ def run_simulation():
 
     while running_pygame:
         for event in pygame.event.get():
-            if event.type == pygame.QUIT: running_pygame = False
+            if event.type == pygame.QUIT:
+                running_pygame = False
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE: running_pygame = False
-                if event.key == KEY_VIEW_SUPERVISOR_PUBLIC: # Taste 0
+                if event.key == pygame.K_ESCAPE:
+                    running_pygame = False
+                if event.key == KEY_VIEW_SUPERVISOR_PUBLIC:
                     current_view_mode = "SUPERVISOR_VIEW"
-                    # show_supervisor_logistics_map bleibt unverändert, wird mit KEY_VIEW_SUPERVISOR_LOGISTICS umgeschaltet
-                elif event.key == KEY_VIEW_SUPERVISOR_LOGISTICS: # Taste P
+                elif event.key == KEY_VIEW_SUPERVISOR_LOGISTICS:
                     if model.strategy == "supervisor":
-                        current_view_mode = "SUPERVISOR_VIEW" # Sicherstellen, dass wir im Supervisor-Modus sind
+                        current_view_mode = "SUPERVISOR_VIEW"
                         show_supervisor_logistics_map = not show_supervisor_logistics_map
                 elif event.key in agent_view_keys:
                     idx = agent_view_keys[event.key]
@@ -255,8 +271,6 @@ def run_simulation():
                         current_view_mode = "AGENT_VIEW"
                         selected_agent_idx_for_view = idx
 
-        # *** KORRIGIERTE ZEILE ***
-        # Wir prüfen jetzt "model.running", die Standard-Variable von Mesa.
         if model.running:
             time_since_last_model_step += clock.get_rawtime()
             if time_since_last_model_step >= 1000.0 / SIMULATION_STEPS_PER_SECOND:
@@ -267,20 +281,23 @@ def run_simulation():
             agents_list_for_view_check = list(model.agents)
             if not (agents_list_for_view_check and 0 <= selected_agent_idx_for_view < len(agents_list_for_view_check)):
                 selected_agent_idx_for_view = 0
-                if not agents_list_for_view_check: current_view_mode = "NONE"
+                if not agents_list_for_view_check:
+                    current_view_mode = "NONE"
 
         screen.fill(WHITE)
         draw_world_view(screen, model, current_view_mode, selected_agent_idx_for_view, show_supervisor_logistics_map)
         draw_grid(screen)
-        if model.strategy == "decentralized": draw_physical_blackboard(screen, model)
+        if model.strategy == "decentralized":
+            draw_physical_blackboard(screen, model)
         draw_agents(screen, model)
         draw_base_resource_text(screen, model, game_font)
-        draw_view_mode_text(screen, current_view_mode, selected_agent_idx_for_view, model, game_font, show_supervisor_logistics_map)
+        draw_view_mode_text(screen, current_view_mode, selected_agent_idx_for_view, model, game_font,
+                            show_supervisor_logistics_map)
 
         pygame.display.flip()
         clock.tick(FRAMES_PER_SECOND)
 
-    pygame.font.quit();
+    pygame.font.quit()
     pygame.quit()
 
 

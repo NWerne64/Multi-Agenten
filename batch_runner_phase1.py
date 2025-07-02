@@ -10,8 +10,8 @@ import time
 # 1. Definiere die Parameter, die wir in Kombination testen wollen.
 # WICHTIG: Diese Parameter müssen EXAKT den Argumentnamen der AoELiteModel.__init__-Methode entsprechen.
 variable_params = {
-    "min_explore_target_separation_cfg": [25, 30], # Entspricht min_explore_target_separation_cfg
-    "min_unknown_ratio_for_continued_exploration_cfg": [0.02, 0.7], # Entspricht min_unknown_ratio_for_continued_exploration_cfg
+    "min_explore_target_separation_cfg": [30, 60], # Entspricht min_explore_target_separation_cfg
+    "min_unknown_ratio_for_continued_exploration_cfg": [0.0001, 0,7], # Entspricht min_unknown_ratio_for_continued_exploration_cfg
     # agent_vision_radius wurde entfernt, da nicht gewünscht.
     # Weitere Parameter, die nicht direkt in AoELiteModel.__init__ sind, können hier nicht variiert werden.
 }
@@ -53,7 +53,7 @@ if __name__ == '__main__':
     results_list = batch_run(
         model_cls=AoELiteModel,     # Modellklasse
         parameters=all_parameters,  # ALLE Parameter hier übergeben
-        iterations=50,             # 100 Durchläufe pro Parameter-Kombination
+        iterations=100,             # 100 Durchläufe pro Parameter-Kombination
         max_steps=8000,             # ERHÖHT: Sicherheitslimit pro Simulation
         display_progress=True
     )
