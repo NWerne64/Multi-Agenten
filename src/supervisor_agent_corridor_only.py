@@ -26,12 +26,19 @@ class SupervisorAgent(mesa.Agent):
     CORRIDOR_ATTEMPT_THRESHOLD = 2
     DEFAULT_TOUR_SIZE = 4
     MIN_TOUR_SIZE = 2
+    MIN_CORRIDOR_TOUR_SIZE = 2
+    MAX_CORRIDOR_TOUR_SIZE = 4
+    # Maximaler Abstand (Manhattan-Distanz) zwischen den Startpunkten der Korridore in einer Tour
+    MAX_CORRIDOR_TOUR_DISTANCE = 40
+    MIN_BUNDLE_SIZE = 2
+    MAX_BUNDLE_SIZE = 4
+    # Suchradius für weitere Korridore um den ersten Anker-Korridor herum
+    BUNDLE_SEARCH_RADIUS = 40
 
     def __init__(self, model, home_pos, role_id_for_display="supervisor_0"):
         super().__init__(model=model)
         self.role_id = role_id_for_display
         self.home_pos = home_pos
-
         self.supervisor_known_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN, dtype=int)
         self.supervisor_exploration_logistics_map = np.full((model.grid_width_val, model.grid_height_val), UNKNOWN,
                                                             dtype=int)
@@ -49,45 +56,144 @@ class SupervisorAgent(mesa.Agent):
         self.resource_goals = self.model.resource_goals.copy()
         self._pending_worker_reports = []
         self._tasks_to_assign_to_worker = {}
-
-        # NEU: Zähler für Ressourcen, die AKTIV von Workern BEANSPRUCHT werden (d.h. Aufgabe zugewiesen)
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
-
         self.max_new_collect_tasks_per_planning = self.model.num_agents_val
         self.max_new_explore_tasks_per_planning = self.model.num_agents_val
-
         self.pending_exploration_targets = set()
+
+        # KORRIGIERTE ZEILE: Verwendet itertools statt der alten Mesa-Methode
         self.task_id_counter = itertools.count(1)
 
-        self.MIN_EXPLORE_TARGET_SEPARATION_val = getattr(self.model, 'MIN_EXPLORE_TARGET_SEPARATION_val',
-                                                         MIN_EXPLORE_TARGET_SEPARATION)
-        self.min_unknown_ratio_for_continued_exploration_val = getattr(self.model,
-                                                                       'MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION_val',
-                                                                       MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION)
+        # Hotspot-Logik für die initiale Verteilung
         self.initial_hotspots_abs = []
-        hotspots_config = getattr(self.model, 'SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS_val',
-                                  SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS)
+        hotspots_config = getattr(self.model, 'SUPERVISOR_INITIAL_EXPLORATION_HOTSPOTS_val', [])
         if hotspots_config:
             for rel_x, rel_y in hotspots_config:
                 abs_x = int(self.model.grid_width_val * rel_x)
                 abs_y = int(self.model.grid_height_val * rel_y)
-                abs_x = max(0, min(abs_x, self.model.grid_width_val - 1))
-                abs_y = max(0, min(abs_y, self.model.grid_height_val - 1))
                 self.initial_hotspots_abs.append((abs_x, abs_y))
         self.model.random.shuffle(self.initial_hotspots_abs)
-        self.attempted_hotspots = set()
-
-        self.total_grid_cells = self.model.grid_width_val * self.model.grid_height_val
-        self.initial_hotspot_planning_complete = False
-        self.no_normal_target_found_count = 0
 
         self.needs_new_planning = True
-        self.max_task_queue_buffer = 4
-
         self.active_corridors_viz = {}
+        self.no_normal_target_found_count = 0
 
-        #print(
-            #f"[S_AGENT {self.role_id}] (Init): Supervisor created. MIN_EXPLORE_TARGET_SEPARATION: {self.MIN_EXPLORE_TARGET_SEPARATION_val}, DEFAULT_CORRIDOR_LENGTH: {self.DEFAULT_CORRIDOR_LENGTH}")
+    def _check_if_exploration_is_needed(self):
+        """Prüft, ob Erkundung basierend auf Ressourcenzielen und Kartenabdeckung notwendig ist."""
+        unlocated_needed_resources = 0
+        for res_type_iter, target_amount_iter in self.resource_goals.items():
+            if self.model.base_resources_collected.get(res_type_iter, 0) < target_amount_iter:
+                res_const = WOOD_SEEN if res_type_iter == 'wood' else STONE_SEEN
+                if np.count_nonzero(self.supervisor_known_map == res_const) == 0:
+                    unlocated_needed_resources += 1
+
+        current_unknown_logistics_ratio = np.count_nonzero(
+            self.supervisor_exploration_logistics_map == UNKNOWN) / (
+                                                      self.model.grid_width_val * self.model.grid_height_val)
+
+        goals_fully_met = all(
+            self.model.base_resources_collected.get(res_type, 0) >= target_amount for res_type, target_amount in
+            self.resource_goals.items())
+
+        if not goals_fully_met:
+            min_ratio = getattr(self.model, 'min_unknown_ratio_for_continued_exploration_cfg', 0.01)
+            if unlocated_needed_resources > 0 or current_unknown_logistics_ratio > min_ratio:
+                return True
+        return False
+
+    def _plan_corridor_bundles(self, max_bundles_to_plan):
+        """Plant Pakete ("Bundles") aus 2-4 intelligent ausgewählten, nahegelegenen Korridoren."""
+        bundles_planned = 0
+        temp_excluded_targets = self._get_all_assigned_targets()
+
+        while bundles_planned < max_bundles_to_plan:
+            anchor_candidate = self._find_best_corridor_candidate(temp_excluded_targets)
+            if not anchor_candidate:
+                break
+
+            anchor_task = self._create_single_corridor_task_dict(anchor_candidate['entry_U'],
+                                                                 anchor_candidate['parent_K'])
+            if not anchor_task:
+                temp_excluded_targets.add(anchor_candidate['entry_U'])
+                continue
+
+            corridor_bundle = [anchor_task]
+            temp_excluded_targets.add(anchor_candidate['entry_U'])
+            for cell in anchor_task['corridor_path']: temp_excluded_targets.add(cell)
+
+            nearby_candidates = self._get_all_corridor_candidates(temp_excluded_targets)
+            nearby_candidates.sort(key=lambda c: self._manhattan_distance(c['entry_U'], anchor_candidate['entry_U']))
+
+            for candidate in nearby_candidates:
+                if len(corridor_bundle) >= self.MAX_BUNDLE_SIZE: break
+                if self._manhattan_distance(candidate['entry_U'],
+                                            anchor_candidate['entry_U']) > self.BUNDLE_SEARCH_RADIUS: continue
+
+                task = self._create_single_corridor_task_dict(candidate['entry_U'], candidate['parent_K'])
+                if task:
+                    corridor_bundle.append(task)
+                    temp_excluded_targets.add(candidate['entry_U'])
+                    for cell in task['corridor_path']: temp_excluded_targets.add(cell)
+
+            if len(corridor_bundle) >= self.MIN_BUNDLE_SIZE:
+                new_bundle_task = {
+                    'task_id': f"task_bundle_{next(self.task_id_counter)}",
+                    'type': 'execute_corridor_tour',
+                    'tour_steps': corridor_bundle,
+                    'status': 'pending_assignment'
+                }
+                self.task_queue.append(new_bundle_task)
+                bundles_planned += 1
+
+        return bundles_planned
+
+    def _find_best_corridor_candidate(self, excluded_targets):
+        """Findet den einzelnen, besten Startpunkt für einen neuen Korridor."""
+        candidates = self._get_all_corridor_candidates(excluded_targets)
+        return candidates[0] if candidates else None
+
+    def _get_all_corridor_candidates(self, excluded_targets):
+        """Sammelt und bewertet ALLE möglichen Startpunkte (Frontiers) für Korridore."""
+        logistics_map = self.supervisor_exploration_logistics_map
+        candidate_entries = []
+        passable_rows, passable_cols = np.where(logistics_map == SUPERVISOR_LOGISTICS_KNOWN_PASSABLE)
+        parent_cells = list(zip(map(int, passable_rows), map(int, passable_cols)))
+        self.model.random.shuffle(parent_cells)
+        evaluated_frontiers = set()
+
+        for p_pos in parent_cells:
+            for dx, dy in self.NEIGHBOR_OFFSETS:
+                entry_U_cand = (p_pos[0] + dx, p_pos[1] + dy)
+                if not (0 <= entry_U_cand[0] < self.model.grid_width_val and 0 <= entry_U_cand[
+                    1] < self.model.grid_height_val): continue
+                if logistics_map[entry_U_cand[0], entry_U_cand[
+                    1]] != UNKNOWN or entry_U_cand in excluded_targets or entry_U_cand in evaluated_frontiers: continue
+
+                evaluated_frontiers.add(entry_U_cand)
+                score = self._calculate_frontier_potential_score(entry_U_cand, logistics_map)
+                if score > 0:
+                    candidate_entries.append({'parent_K': p_pos, 'entry_U': entry_U_cand, 'score': score})
+
+        candidate_entries.sort(key=lambda x: x['score'], reverse=True)
+        return candidate_entries
+
+    def _create_single_corridor_task_dict(self, entry_U, parent_K):
+        """Erstellt das Dictionary für eine einzelne Korridor-Aufgabe."""
+        corridor_path = self._trace_corridor_from_entry(entry_U, parent_K, self.DEFAULT_CORRIDOR_LENGTH)
+        if not corridor_path or len(corridor_path) < 2: return None
+
+        for cell_in_path in corridor_path:
+            if (0 <= cell_in_path[0] < self.model.grid_width_val and 0 <= cell_in_path[1] < self.model.grid_height_val):
+                self.supervisor_exploration_logistics_map[
+                    cell_in_path[0], cell_in_path[1]] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED
+            self.pending_exploration_targets.add(cell_in_path)
+
+        return {
+            'task_id': f"task_single_corridor_{next(self.task_id_counter)}",
+            'type': 'explore_corridor', 'entry_pos': parent_K,
+            'corridor_path': corridor_path, 'target_pos': parent_K,
+            'status': 'part_of_bundle'
+        }
 
     def get_initial_task(self):
         """
@@ -276,27 +382,20 @@ class SupervisorAgent(mesa.Agent):
 
     def _plan_new_tasks(self):
         """
-        Hauptplanungsfunktion, die jetzt auch Touren plant und die Ressourcenbedarfe verwaltet.
-        KORRIGIERT: Neue Sammelaufgaben werden nur erstellt, solange die ANZAHL der AKTIV zugewiesenen
-        Ressourcenaufgaben das Ziel NICHT erreicht hat.
-        Überschüssige Aufgaben in der Warteschlange UND in den für Worker vorgemerkten Aufgaben
-        werden entfernt, wenn die zugewiesene Menge das Ziel erreicht.
-        MODIFIZIERT: Erzwingt eine Korridor-Erkundung als Fallback, wenn keine anderen Aufgaben gefunden wurden,
-        aber noch Erkundungsbedarf besteht.
+        Hauptplanungsfunktion, die eine Zwei-Phasen-Strategie verfolgt:
+        1. Zuerst werden die initialen Hotspots als Einzelaufgaben vergeben.
+        2. Danach werden intelligente Korridor-Bündel für die Haupterkundung geplant.
         """
         collect_tasks_added_now = 0
-        explore_tasks_added_now = 0
-        hotspots_created_this_step = 0
 
-        # Zähler für beanspruchte Ressourcen zurücksetzen und NUR basierend auf AKTIV zugewiesenen Aufgaben neu berechnen
+        # --- Ressourcen- und Aufgaben-Bereinigung (unverändert) ---
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
-        for task_data in self.assigned_tasks.values():  # Nur zugewiesene Aufgaben zählen
+        for task_data in self.assigned_tasks.values():
             if task_data.get('type') == 'collect_resource':
                 res_type = task_data.get('resource_type')
                 if res_type in self.claimed_resources_by_supervisor:
                     self.claimed_resources_by_supervisor[res_type] += 1
 
-        # Aufgabenwarteschlange bereinigen (self.task_queue) - (Dieser Abschnitt bleibt unverändert)
         new_task_queue = []
         for task_data in self.task_queue:
             if task_data.get('type') == 'collect_resource':
@@ -309,7 +408,6 @@ class SupervisorAgent(mesa.Agent):
                 new_task_queue.append(task_data)
         self.task_queue = new_task_queue
 
-        # Vorgemerkte Aufgaben bereinigen (_tasks_to_assign_to_worker) - (Dieser Abschnitt bleibt unverändert)
         tasks_to_assign_cleaned = {}
         for worker_id, task_data in list(self._tasks_to_assign_to_worker.items()):
             if task_data.get('type') == 'collect_resource':
@@ -321,25 +419,6 @@ class SupervisorAgent(mesa.Agent):
             else:
                 tasks_to_assign_cleaned[worker_id] = task_data
         self._tasks_to_assign_to_worker = tasks_to_assign_cleaned
-
-        # --- Initiales Hotspot-Planning (unverändert) ---
-        if not self.initial_hotspot_planning_complete:
-            unattempted_hotspots_for_planning = 0
-            for hotspot_pos in self.initial_hotspots_abs:
-                if explore_tasks_added_now >= self.max_new_explore_tasks_per_planning: break
-                if hotspot_pos not in self.attempted_hotspots:
-                    unattempted_hotspots_for_planning += 1
-                    if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):
-                        new_hotspot_task = {'task_id': f"task_hotspot_{next(self.task_id_counter)}",
-                                            'type': 'explore_area', 'path_to_explore': [hotspot_pos],
-                                            'status': 'pending_assignment', 'target_pos': hotspot_pos,
-                                            'is_initial_hotspot_task': True}
-                        self.task_queue.insert(0, new_hotspot_task)
-                        self.attempted_hotspots.add(hotspot_pos)
-                        explore_tasks_added_now += 1
-                        hotspots_created_this_step += 1
-            if unattempted_hotspots_for_planning == 0 and len(self.initial_hotspots_abs) > 0:
-                self.initial_hotspot_planning_complete = True
 
         # --- Ressourcen-Sammel-Planung (unverändert) ---
         resource_priority = sorted(self.resource_goals.keys(), key=lambda r: (
@@ -357,8 +436,7 @@ class SupervisorAgent(mesa.Agent):
             self.model.random.shuffle(candidate_patches_coords)
             for patch_pos in candidate_patches_coords:
                 if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type): continue
-                if self.claimed_resources_by_supervisor.get(res_type, 0) >= needed_goal:
-                    break
+                if self.claimed_resources_by_supervisor.get(res_type, 0) >= needed_goal: break
                 self.supervisor_known_map[patch_pos[0], patch_pos[1]] = SUPERVISOR_CLAIMED_RESOURCE
                 new_collect_task = {'task_id': f"task_collect_{next(self.task_id_counter)}", 'type': 'collect_resource',
                                     'target_pos': patch_pos, 'resource_type': res_type,
@@ -368,140 +446,197 @@ class SupervisorAgent(mesa.Agent):
                 if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
-        # --- Logik zur Entscheidung, ob Erkundung nötig ist (unverändert) ---
-        unlocated_needed_resources = 0
-        for res_type_iter, target_amount_iter in self.resource_goals.items():
-            if self.model.base_resources_collected.get(res_type_iter, 0) < target_amount_iter:
-                res_const = WOOD_SEEN if res_type_iter == 'wood' else STONE_SEEN
-                if np.count_nonzero(self.supervisor_known_map == res_const) == 0: unlocated_needed_resources += 1
-        current_unknown_logistics_ratio = np.count_nonzero(
-            self.supervisor_exploration_logistics_map == UNKNOWN) / self.total_grid_cells
-        goals_fully_met = all(
-            self.model.base_resources_collected.get(res_type, 0) >= target_amount for res_type, target_amount in
-            self.resource_goals.items())
+        # --- NEUE ZWEI-PHASEN-ERKUNDUNGSPLANUNG ---
 
-        should_explore_actively = False
-        if not goals_fully_met:
-            if unlocated_needed_resources > 0 or current_unknown_logistics_ratio > self.min_unknown_ratio_for_continued_exploration_val:
-                should_explore_actively = True
+        # Phase 1: Initiales Hotspot-Planning
+        # Solange es nicht zugewiesene Hotspots gibt, werden diese priorisiert
+        if self.initial_hotspots_abs:
+            # Nimm den nächsten Hotspot von der Liste
+            hotspot_pos = self.initial_hotspots_abs.pop(0)
 
-        # --- MODIFIZIERTE Erkundungsplanung ---
-        if should_explore_actively and (self.initial_hotspot_planning_complete or hotspots_created_this_step == 0):
-            # Wir versuchen, Touren zu planen, aber erzwingen sie nicht mehr.
-            # Der Rückfallmechanismus kümmert sich um festgefahrene Situationen.
-            explore_tasks_added_now += self._plan_exploration_tours(
-                self.max_new_explore_tasks_per_planning - explore_tasks_added_now)
+            # Erstelle eine Aufgabe, falls das Ziel nicht schon vergeben ist
+            if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):
+                new_hotspot_task = {
+                    'task_id': f"task_hotspot_{next(self.task_id_counter)}",
+                    'type': 'explore_area',
+                    'path_to_explore': [hotspot_pos],  # Wichtig: als Pfad mit einem Schritt verpacken
+                    'is_initial_hotspot_task': True,
+                    'status': 'pending_assignment'
+                }
+                # Füge die Aufgabe ganz vorne in die Warteschlange ein, damit sie sofort genommen wird
+                self.task_queue.insert(0, new_hotspot_task)
 
-        # --- NEU: Fallback-Mechanismus zur Erstellung von Korridor-Aufgaben ---
-        # Wenn aktiv erkundet werden soll, aber bisher KEINE neuen Erkundungsaufgaben erstellt wurden
-        # (weder durch Hotspots noch durch Touren), dann erzwingen wir die Erstellung einer Korridor-Aufgabe.
-        if should_explore_actively and explore_tasks_added_now == 0:
-            # print(f"[S_AGENT {self.role_id}] - Fallback: No tour/hotspot tasks created. Forcing corridor exploration.")
-            if self._find_and_plan_corridor_task(set()):
-                explore_tasks_added_now += 1
-                self.no_normal_target_found_count = 0  # Zähler zurücksetzen, da wir eine Aufgabe erstellt haben
+            # Beende die Planung für diesen Schritt, nachdem ein Hotspot zugewiesen wurde.
+            # Im nächsten Schritt wird der nächste Hotspot geplant oder, wenn leer, Phase 2 begonnen.
+            return
+
+            # Phase 2: Planen von intelligenten Korridor-Bündeln (wird nur ausgeführt, wenn keine Hotspots mehr da sind)
+        should_explore_actively = self._check_if_exploration_is_needed()
+        if should_explore_actively:
+            tasks_planned = self._plan_corridor_bundles(self.max_new_explore_tasks_per_planning)
+            if tasks_planned == 0:
+                self.no_normal_target_found_count += 1
             else:
-                # print(f"[S_AGENT {self.role_id}] - Fallback failed: Could not create a corridor task either.")
-                self.no_normal_target_found_count += 1  # Zähler erhöhen, wenn selbst das fehlschlägt
-        else:
-            # Wenn Aufgaben gefunden wurden, den Zähler für "keine Aufgabe gefunden" zurücksetzen.
-            self.no_normal_target_found_count = 0
+                self.no_normal_target_found_count = 0
 
-    def _plan_exploration_tours(self, max_tours_to_plan):
+    def _get_all_assigned_targets(self):
+        """Sammelt alle Ziele, die aktuell zugewiesen oder in der Warteschlange sind."""
+        targets = set()
+        # Berücksichtigt sowohl die Haupt-Task-Queue als auch die für Worker vorgemerkten Aufgaben
+        all_tasks = list(self.assigned_tasks.values()) + self.task_queue + list(
+            self._tasks_to_assign_to_worker.values())
+
+        for task_data in all_tasks:
+            task_type = task_data.get('type')
+            if task_type == 'execute_corridor_tour':
+                # Geht durch die Sub-Aufgaben in einer Tour
+                for step in task_data.get('tour_steps', []):
+                    # Fügt den Startpunkt des Korridors hinzu
+                    entry_pos = step.get('entry_pos')
+                    if entry_pos:
+                        targets.add(entry_pos)
+            elif task_type == 'explore_corridor':
+                # Fügt den Startpunkt eines einzelnen Korridors hinzu
+                entry_pos = task_data.get('entry_pos')
+                if entry_pos:
+                    targets.add(entry_pos)
+            elif task_data.get('target_pos'):
+                # Fügt das Ziel für andere Aufgabentypen hinzu (z.B. collect_resource)
+                targets.add(task_data.get('target_pos'))
+
+        return targets
+    # NEUE FUNKTION
+    def _plan_corridor_tours(self, max_tours_to_plan):
         """
-        MODIFIZIERT: Plant Erkundungs-Touren, aber nur, wenn sinnvolle Startziele gefunden werden.
-        Gibt die Anzahl der tatsächlich geplanten Touren zurück.
+        Plant "Touren", die aus 2-4 nahegelegenen Korridor-Aufgaben bestehen.
         """
         tours_planned = 0
-        if max_tours_to_plan <= 0:
-            return 0
-
+        # Sammelt alle Ziele, die in diesem Planungsschritt vergeben werden, um Duplikate zu vermeiden
         temp_pending_targets_this_step = self._get_all_assigned_targets()
 
         while tours_planned < max_tours_to_plan:
-            # Finde das beste Start-Ziel für eine neue Tour
-            start_ziel = self._find_best_frontier_for_exploration(temp_pending_targets_this_step)
-            if not start_ziel:
-                # WICHTIG: Breche ab, wenn kein gutes Start-Ziel gefunden wird.
-                # Der neue Fallback-Mechanismus in _plan_new_tasks wird dies auffangen.
-                break
+            # 1. Finde alle möglichen Startpunkte für Korridore
+            all_candidates = self._get_all_corridor_candidates(temp_pending_targets_this_step)
+            if not all_candidates:
+                break  # Keine Kandidaten mehr, Abbruch
 
-            temp_pending_targets_this_step.add(start_ziel)
-            tour_punkte = [start_ziel]
+            # 2. Wähle den besten Kandidaten als Anker für die neue Tour
+            start_candidate = all_candidates.pop(0)
+            start_entry_pos = start_candidate['entry_U']
+            temp_pending_targets_this_step.add(start_entry_pos)
 
-            # Fülle die Tour mit weiteren Zielen auf (unveränderter Teil)
-            if len(tour_punkte) < self.DEFAULT_TOUR_SIZE:
-                candidate_frontiers = self._get_all_frontiers(temp_pending_targets_this_step)
-                if candidate_frontiers:
-                    last_added_point = tour_punkte[-1]
-                    candidate_frontiers.sort(key=lambda p: self._manhattan_distance(p, last_added_point))
-                    for candidate in candidate_frontiers:
-                        if len(tour_punkte) >= self.DEFAULT_TOUR_SIZE:
-                            break
-                        is_far_enough = True
-                        for point_in_tour in tour_punkte:
-                            if self._manhattan_distance(candidate,
-                                                        point_in_tour) < self.MIN_EXPLORE_TARGET_SEPARATION_val:
-                                is_far_enough = False
-                                break
-                        if is_far_enough:
-                            tour_punkte.append(candidate)
-                            temp_pending_targets_this_step.add(candidate)
+            # 3. Erstelle die erste Korridor-Aufgabe für die Tour
+            first_corridor_task = self._create_single_corridor_task_dict(start_candidate['entry_U'],
+                                                                         start_candidate['parent_K'])
+            if not first_corridor_task:
+                continue  # Konnte aus irgendeinem Grund keinen Korridor erstellen
 
-            tour_paket = []
-            for punkt in tour_punkte:
-                tour_paket.append({'type': 'explore_area', 'target_pos': punkt})
+            corridor_tour_steps = [first_corridor_task]
 
-            if len(tour_paket) >= self.MIN_TOUR_SIZE:
+            # 4. Suche nach weiteren nahegelegenen Korridoren für die Tour
+            # Sortiere die verbleibenden Kandidaten nach ihrer Nähe zum Ankerpunkt
+            all_candidates.sort(key=lambda c: self._manhattan_distance(c['entry_U'], start_entry_pos))
+
+            for nearby_candidate in all_candidates:
+                if len(corridor_tour_steps) >= self.MAX_CORRIDOR_TOUR_SIZE:
+                    break  # Die Tour ist voll
+
+                candidate_pos = nearby_candidate['entry_U']
+                if candidate_pos in temp_pending_targets_this_step:
+                    continue  # Dieser Punkt wurde bereits in einer anderen Tour verplant
+
+                # Prüfe, ob der Kandidat nahe genug am Ankerpunkt ist
+                if self._manhattan_distance(candidate_pos, start_entry_pos) <= self.MAX_CORRIDOR_TOUR_DISTANCE:
+                    nearby_corridor_task = self._create_single_corridor_task_dict(nearby_candidate['entry_U'],
+                                                                                  nearby_candidate['parent_K'])
+                    if nearby_corridor_task:
+                        corridor_tour_steps.append(nearby_corridor_task)
+                        temp_pending_targets_this_step.add(candidate_pos)
+
+            # 5. Erstelle die finale Tour-Aufgabe, wenn sie groß genug ist
+            if len(corridor_tour_steps) >= self.MIN_CORRIDOR_TOUR_SIZE:
                 new_tour_task = {
-                    'task_id': f"task_tour_{next(self.task_id_counter)}",
-                    'type': 'execute_tour',
-                    'tour_steps': tour_paket,
+                    'task_id': f"task_corridor_tour_{next(self.task_id_counter)}",
+                    'type': 'execute_corridor_tour',  # NEUER AUFGABENTYP
+                    'tour_steps': corridor_tour_steps,
                     'status': 'pending_assignment'
                 }
                 self.task_queue.append(new_tour_task)
                 tours_planned += 1
             else:
-                # Wenn die Tour nicht groß genug ist, machen wir die Ziele wieder verfügbar,
-                # indem wir sie NICHT dauerhaft zu `pending_exploration_targets` hinzufügen.
-                # Dies ist wichtig, damit der Korridor-Fallback sie finden kann.
-                pass
+                # Tour war zu klein, gib die Ziele wieder frei (optional, aber sauber)
+                for task_dict in corridor_tour_steps:
+                    path = task_dict.get('corridor_path', [])
+                    for cell in path:
+                        temp_pending_targets_this_step.discard(cell)
 
         return tours_planned
 
-    def _get_all_assigned_targets(self):
-        """Sammelt alle Ziele, die aktuell zugewiesen oder in der Warteschlange sind."""
-        targets = set()
-        all_tasks = list(self.assigned_tasks.values()) + self.task_queue
-        for task_data in all_tasks:
-            if task_data.get('type') == 'execute_tour':
-                for step in task_data.get('tour_steps', []):
-                    targets.add(step['target_pos'])
-            elif task_data.get('target_pos'):
-                targets.add(task_data.get('target_pos'))
-        return targets
-
-    def _get_all_frontiers(self, excluded_targets):
-        """Findet alle Frontier-Zellen, die nicht in excluded_targets sind."""
-        frontiers = []
+    # NEUE FUNKTION
+    def _get_all_corridor_candidates(self, excluded_targets):
+        """
+        Sammelt und bewertet ALLE möglichen Startpunkte (Frontiers) für Korridore.
+        Gibt eine nach Score sortierte Liste zurück.
+        """
         logistics_map = self.supervisor_exploration_logistics_map
-        known_passable_rows, known_passable_cols = np.where(logistics_map == SUPERVISOR_LOGISTICS_KNOWN_PASSABLE)
-        parent_cell_coords = list(zip(map(int, known_passable_rows), map(int, known_passable_cols)))
-        self.model.random.shuffle(parent_cell_coords)
+        candidate_entries = []
 
-        evaluated = set()
-        for parent_pos in parent_cell_coords:
+        # Finde alle bekannten, passierbaren Zellen
+        passable_rows, passable_cols = np.where(logistics_map == SUPERVISOR_LOGISTICS_KNOWN_PASSABLE)
+        parent_cells = list(zip(map(int, passable_rows), map(int, passable_cols)))
+        self.model.random.shuffle(parent_cells)
+
+        evaluated_frontiers = set()
+
+        for p_pos in parent_cells:
             for dx, dy in self.NEIGHBOR_OFFSETS:
-                frontier_pos = (parent_pos[0] + dx, parent_pos[1] + dy)
-                if not (0 <= frontier_pos[0] < self.model.grid_width_val and 0 <= frontier_pos[
+                entry_U_cand = (p_pos[0] + dx, p_pos[1] + dy)
+
+                # Überspringe ungültige, bereits vergebene oder schon evaluierte Zellen
+                if not (0 <= entry_U_cand[0] < self.model.grid_width_val and 0 <= entry_U_cand[
                     1] < self.model.grid_height_val):
                     continue
+                if logistics_map[entry_U_cand[0], entry_U_cand[
+                    1]] != UNKNOWN or entry_U_cand in excluded_targets or entry_U_cand in evaluated_frontiers:
+                    continue
 
-                if logistics_map[frontier_pos[0], frontier_pos[
-                    1]] == UNKNOWN and frontier_pos not in excluded_targets and frontier_pos not in evaluated:
-                    frontiers.append(frontier_pos)
-                    evaluated.add(frontier_pos)
-        return frontiers
+                evaluated_frontiers.add(entry_U_cand)
+                score = self._calculate_frontier_potential_score(entry_U_cand, logistics_map)
+                if score > 0:
+                    candidate_entries.append({'parent_K': p_pos, 'entry_U': entry_U_cand, 'score': score})
+
+        # Sortiere alle gefundenen Kandidaten nach ihrem Potenzial
+        candidate_entries.sort(key=lambda x: x['score'], reverse=True)
+        return candidate_entries
+
+    # NEUE FUNKTION
+    def _create_single_corridor_task_dict(self, entry_U, parent_K):
+        """
+        Erstellt das Dictionary für eine einzelne Korridor-Aufgabe, ohne es zur Task-Queue hinzuzufügen.
+        Gibt das Dictionary oder None bei einem Fehler zurück.
+        """
+        corridor_path = self._trace_corridor_from_entry(entry_U, parent_K, self.DEFAULT_CORRIDOR_LENGTH)
+
+        if not corridor_path or len(corridor_path) < 2:
+            return None
+
+        # Markiere die Zellen als "angezielt", um Überschneidungen zu vermeiden
+        for cell_in_path in corridor_path:
+            if (0 <= cell_in_path[0] < self.model.grid_width_val and 0 <= cell_in_path[1] < self.model.grid_height_val):
+                self.supervisor_exploration_logistics_map[
+                    cell_in_path[0], cell_in_path[1]] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED
+            self.pending_exploration_targets.add(cell_in_path)
+
+        # Erstelle das Task-Dictionary
+        corridor_task = {
+            'task_id': f"task_single_corridor_{next(self.task_id_counter)}",
+            'type': 'explore_corridor',
+            'entry_pos': parent_K,
+            'corridor_path': corridor_path,
+            'target_pos': parent_K,
+            'status': 'part_of_tour'  # Interner Status
+        }
+        return corridor_task
 
     def _find_corridor_entry_candidate(self, temp_excluded_targets=None):
         if temp_excluded_targets is None: temp_excluded_targets = set()
@@ -653,83 +788,6 @@ class SupervisorAgent(mesa.Agent):
                     potential_unknown_count += 1
                     q.append((next_pos, depth + 1))
         return potential_unknown_count
-
-    def _find_best_frontier_for_exploration(self, temp_excluded_targets=None):
-        if temp_excluded_targets is None: temp_excluded_targets = set()
-        candidate_targets = []
-        logistics_map = self.supervisor_exploration_logistics_map
-        current_unknown_logistics_r = np.count_nonzero(logistics_map == UNKNOWN) / self.total_grid_cells
-        is_breakout_phase = current_unknown_logistics_r >= self.BREAKOUT_PHASE_UNKNOWN_THRESHOLD
-        ref_point_for_dist = self.home_pos
-        if self.model.base_deposit_point: ref_point_for_dist = self.model.base_deposit_point
-
-        if is_breakout_phase:
-            all_unknown_on_logistics = []
-            u_rows, u_cols = np.where(logistics_map == UNKNOWN)
-            for r_idx, c_idx in zip(u_rows, u_cols):
-                pos_tuple = (int(r_idx), int(c_idx))
-                if pos_tuple not in self.pending_exploration_targets and pos_tuple not in temp_excluded_targets and \
-                        pos_tuple not in self.attempted_hotspots and logistics_map[
-                    pos_tuple[0], pos_tuple[1]] != SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED:
-                    all_unknown_on_logistics.append(pos_tuple)
-            self.model.random.shuffle(all_unknown_on_logistics)
-            for uc_pos in all_unknown_on_logistics[:self.DEFAULT_DEEP_DIVE_CANDIDATE_COUNT]:
-                if logistics_map[uc_pos[0], uc_pos[1]] != UNKNOWN: continue
-                potential_score = self._calculate_frontier_potential_score(uc_pos, logistics_map)
-                if potential_score < 1: continue
-                dist_to_ref = self._manhattan_distance(uc_pos, ref_point_for_dist)
-                score = (dist_to_ref * self.BREAKOUT_DISTANCE_WEIGHT) + potential_score
-                candidate_targets.append(
-                    {'pos': uc_pos, 'score': score, 'dist': dist_to_ref, 'pot': potential_score})
-        else:
-            evaluated_frontiers = set()
-            known_passable_rows, known_passable_cols = np.where(logistics_map == SUPERVISOR_LOGISTICS_KNOWN_PASSABLE)
-            parent_cell_coords = list(zip(map(int, known_passable_rows), map(int, known_passable_cols)))
-            self.model.random.shuffle(parent_cell_coords)
-            for parent_pos in parent_cell_coords[:200]:
-                for dx, dy in self.NEIGHBOR_OFFSETS:
-                    frontier_pos = (parent_pos[0] + dx, parent_pos[1] + dy)
-                    if not (0 <= frontier_pos[0] < self.model.grid_width_val and 0 <= frontier_pos[
-                        1] < self.model.grid_height_val): continue
-                    if logistics_map[frontier_pos[0], frontier_pos[1]] == UNKNOWN and \
-                            frontier_pos not in self.pending_exploration_targets and \
-                            frontier_pos not in temp_excluded_targets and \
-                            frontier_pos not in evaluated_frontiers and \
-                            logistics_map[
-                                frontier_pos[0], frontier_pos[1]] != SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED:
-                        evaluated_frontiers.add(frontier_pos)
-                        score = float(self._calculate_frontier_potential_score(frontier_pos, logistics_map))
-                        if score < 1: continue
-                        candidate_targets.append({'pos': frontier_pos, 'score': score,
-                                                  'dist': self._manhattan_distance(frontier_pos, ref_point_for_dist),
-                                                  'pot': score})
-                        if len(candidate_targets) > self.DEFAULT_DEEP_DIVE_CANDIDATE_COUNT * 2: break
-                if len(candidate_targets) > self.DEFAULT_DEEP_DIVE_CANDIDATE_COUNT * 2: break
-        if not candidate_targets: return None
-        candidate_targets.sort(key=lambda f: f['score'], reverse=True)
-        targets_to_avoid_proximity_to = set(
-            self.pending_exploration_targets) | temp_excluded_targets | self.attempted_hotspots
-        for task_data in list(self.assigned_tasks.values()) + self.task_queue:
-            if task_data.get('type') == 'explore_area' and task_data.get('target_pos'):
-                targets_to_avoid_proximity_to.add(task_data.get('target_pos'))
-            elif task_data.get('type') == 'explore_corridor' and task_data.get('corridor_path') and task_data.get(
-                    'corridor_path'):
-                targets_to_avoid_proximity_to.add(task_data.get('corridor_path')[0])
-                targets_to_avoid_proximity_to.add(task_data.get('corridor_path')[-1])
-        targeted_rows, targeted_cols = np.where(logistics_map == SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED)
-        for r, c in zip(targeted_rows, targeted_cols): targets_to_avoid_proximity_to.add((r, c))
-        best_choice_satisfying_separation = None
-        for cand in candidate_targets:
-            candidate_pos = cand['pos']
-            is_far_enough = True
-            if self.MIN_EXPLORE_TARGET_SEPARATION_val > 0:
-                for existing_target in targets_to_avoid_proximity_to:
-                    if self._manhattan_distance(candidate_pos,
-                                                existing_target) < self.MIN_EXPLORE_TARGET_SEPARATION_val:
-                        is_far_enough = False
-                        break
-            if is_far_enough: best_choice_satisfying_separation = candidate_pos; break
-        return best_choice_satisfying_separation
 
     def _prepare_tasks_for_assignment(self):
         if not self.task_queue: return
