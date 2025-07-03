@@ -1,4 +1,4 @@
-# src/supervisor_agent.py
+# src/supervisor_agent_corridor_only.py
 import mesa
 import numpy as np
 import itertools
@@ -55,6 +55,7 @@ class SupervisorAgent(mesa.Agent):
         self.assigned_tasks = {}
         self.resource_goals = self.model.resource_goals.copy()
         self._pending_worker_reports = []
+        self._tasks_to_assign_to_worker = {}
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
         self.max_new_collect_tasks_per_planning = self.model.num_agents_val
         self.max_new_explore_tasks_per_planning = self.model.num_agents_val
@@ -76,7 +77,6 @@ class SupervisorAgent(mesa.Agent):
         self.needs_new_planning = True
         self.active_corridors_viz = {}
         self.no_normal_target_found_count = 0
-        print(f"[{self.role_id}] Initialized. Hotspots to assign: {len(self.initial_hotspots_abs)}")
 
     def _check_if_exploration_is_needed(self):
         """Prüft, ob Erkundung basierend auf Ressourcenzielen und Kartenabdeckung notwendig ist."""
@@ -109,8 +109,7 @@ class SupervisorAgent(mesa.Agent):
         while bundles_planned < max_bundles_to_plan:
             anchor_candidate = self._find_best_corridor_candidate(temp_excluded_targets)
             if not anchor_candidate:
-                print(f"LOG: [{self.role_id}] _plan_corridor_bundles: No more valid anchor candidates found.")
-                break
+                break  # Keine Kandidaten mehr gefunden
 
             anchor_task = self._create_single_corridor_task_dict(anchor_candidate['entry_U'],
                                                                  anchor_candidate['parent_K'])
@@ -122,6 +121,7 @@ class SupervisorAgent(mesa.Agent):
             temp_excluded_targets.add(anchor_candidate['entry_U'])
             for cell in anchor_task['corridor_path']: temp_excluded_targets.add(cell)
 
+            # Finde nahegelegene Kandidaten für das Bündel
             nearby_candidates = self._get_all_corridor_candidates(temp_excluded_targets)
             nearby_candidates.sort(key=lambda c: self._manhattan_distance(c['entry_U'], anchor_candidate['entry_U']))
 
@@ -190,10 +190,9 @@ class SupervisorAgent(mesa.Agent):
             self.pending_exploration_targets.add(cell_in_path)
 
         return {
-            'task_id': f"task_single_corridor_{next(self.task_id_counter)}",
-            'type': 'explore_corridor', 'entry_pos': parent_K,
-            'corridor_path': corridor_path, 'target_pos': parent_K,
-            'status': 'part_of_bundle'
+            'task_id': f"task_single_corridor_{next(self.task_id_counter)}", 'type': 'explore_corridor',
+            'entry_pos': parent_K, 'corridor_path': corridor_path,
+            'target_pos': parent_K, 'status': 'part_of_bundle'
         }
 
     def get_initial_task(self):
@@ -240,18 +239,16 @@ class SupervisorAgent(mesa.Agent):
     def step(self):
         self._process_pending_reports()
         if self.needs_new_planning:
-            print(f"--- Step {self.model.steps}: Supervisor needs new planning. ---")
             self._plan_new_tasks()
             self.needs_new_planning = False
+        self._prepare_tasks_for_assignment()
 
     def _process_pending_reports(self):
         if not self._pending_worker_reports: return
-
         reports_to_process = list(self._pending_worker_reports)
         self._pending_worker_reports.clear()
 
-        # LOG: Zeigt an, dass die Funktion aufgerufen wird
-        print(f"\n--- Step {self.model.steps}: Processing {len(reports_to_process)} reports ---")
+        significant_map_change_occurred = False
 
         for report in reports_to_process:
             worker_id = report['worker_id']
@@ -259,135 +256,61 @@ class SupervisorAgent(mesa.Agent):
             task_id_in_report = data.get('task_id')
             task_details_for_report = self.assigned_tasks.get(task_id_in_report) if task_id_in_report else None
             new_worker_state = data.get('status')
-            worker_current_pos = data.get('current_pos')
 
-            # LOG: Grundlegende Informationen zu jedem Bericht
-            print(f"LOG: Report from Worker {worker_id}: Status='{new_worker_state}', TaskID='{task_id_in_report}'")
-
+            # Update der Karte, wenn der Worker bei der Basis ist
             map_updates = data.get('map_segment_updates', {})
-            report_caused_significant_map_change = False
-
-            self.worker_status.setdefault(worker_id, {})
-            if worker_current_pos: self.worker_status[worker_id]['last_pos'] = worker_current_pos
-
-            if worker_current_pos == self.home_pos and map_updates:
-                print(f"LOG: Worker {worker_id} is at home base. Processing {len(map_updates)} map updates.")
+            if map_updates:
                 for pos, reported_state in map_updates.items():
                     px, py = pos
                     if not (0 <= px < self.model.grid_width_val and 0 <= py < self.model.grid_height_val): continue
 
                     original_known_map_value = self.supervisor_known_map[px, py]
-                    current_public_state = original_known_map_value
-                    new_public_state = current_public_state
+                    new_public_state = original_known_map_value
 
-                    if current_public_state == SUPERVISOR_CLAIMED_RESOURCE:
-                        if reported_state == RESOURCE_COLLECTED_BY_ME or reported_state == EMPTY_EXPLORED: new_public_state = EMPTY_EXPLORED
-                    else:
-                        if reported_state == RESOURCE_COLLECTED_BY_ME:
-                            new_public_state = EMPTY_EXPLORED
-                        elif reported_state in [WOOD_SEEN, STONE_SEEN]:
-                            if current_public_state in [UNKNOWN, EMPTY_EXPLORED, BASE_KNOWN] or \
-                                    (current_public_state in [WOOD_SEEN,
-                                                              STONE_SEEN] and current_public_state != reported_state):
-                                new_public_state = reported_state
-                        elif reported_state == BASE_KNOWN:
-                            if current_public_state in [UNKNOWN, EMPTY_EXPLORED]:
-                                new_public_state = reported_state
-                        elif reported_state == EMPTY_EXPLORED:
-                            if current_public_state != SUPERVISOR_CLAIMED_RESOURCE:
-                                if current_public_state in [UNKNOWN, WOOD_SEEN, STONE_SEEN, BASE_KNOWN]:
-                                    new_public_state = reported_state
+                    # Logik zur Aktualisierung des Kartenzustands (vereinfacht)
+                    if reported_state in [WOOD_SEEN, STONE_SEEN, EMPTY_EXPLORED, BASE_KNOWN]:
+                        if original_known_map_value != reported_state:
+                            new_public_state = reported_state
+                    elif reported_state == RESOURCE_COLLECTED_BY_ME:
+                        new_public_state = EMPTY_EXPLORED
 
-                    if original_known_map_value != new_public_state:
+                    if self.supervisor_known_map[px, py] != new_public_state:
                         self.supervisor_known_map[px, py] = new_public_state
-                        report_caused_significant_map_change = True
+                        significant_map_change_occurred = True
 
-                    original_logistics_map_value = self.supervisor_exploration_logistics_map[px, py]
-                    new_logistics_map_value = original_logistics_map_value
+                    # Logik zur Aktualisierung der Logistikkarte
+                    if new_public_state in [EMPTY_EXPLORED, BASE_KNOWN]:
+                        if self.supervisor_exploration_logistics_map[px, py] != SUPERVISOR_LOGISTICS_KNOWN_PASSABLE:
+                            self.supervisor_exploration_logistics_map[px, py] = SUPERVISOR_LOGISTICS_KNOWN_PASSABLE
+                            significant_map_change_occurred = True
 
-                    if new_public_state == EMPTY_EXPLORED or new_public_state == BASE_KNOWN:
-                        if original_logistics_map_value != SUPERVISOR_LOGISTICS_KNOWN_PASSABLE:
-                            new_logistics_map_value = SUPERVISOR_LOGISTICS_KNOWN_PASSABLE
-                    elif new_public_state in [WOOD_SEEN, STONE_SEEN, SUPERVISOR_CLAIMED_RESOURCE]:
-                        if original_logistics_map_value in [UNKNOWN, SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED]:
-                            new_logistics_map_value = SUPERVISOR_LOGISTICS_KNOWN_PASSABLE
-
-                    if original_logistics_map_value != new_logistics_map_value:
-                        self.supervisor_exploration_logistics_map[px, py] = new_logistics_map_value
-                        report_caused_significant_map_change = True
-
+            # WICHTIG: Bearbeitung des Aufgabenstatus
             if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED'] and task_details_for_report:
-                print(
-                    f"LOG: Task {task_id_in_report} (Type: {task_details_for_report.get('type')}) reported as '{new_worker_state}'.")
-                self.needs_new_planning = True
-                print(f"LOG: 'needs_new_planning' set to TRUE due to task completion.")
+                self.needs_new_planning = True  # Eine neue Planung ist nötig
 
+                # ENTFERNE ABGESCHLOSSENE AUFGABE AUS DER BUCHFÜHRUNG
+                if task_id_in_report in self.assigned_tasks:
+                    print(f"LOG: Task {task_id_in_report} completed/failed. Removing from assigned_tasks.")
+                    del self.assigned_tasks[task_id_in_report]
+
+                # Bereinige Visualisierungsdaten, falls vorhanden
                 if task_id_in_report in self.active_corridors_viz:
                     del self.active_corridors_viz[task_id_in_report]
 
-                task_type = task_details_for_report.get('type')
-
-                if task_type == 'collect_resource':
+                # Gib beanspruchte Ressourcen bei Fehlschlag wieder frei
+                if task_details_for_report.get('type') == 'collect_resource':
                     res_type = task_details_for_report.get('resource_type')
-                    if res_type in self.claimed_resources_by_supervisor and self.claimed_resources_by_supervisor[
-                        res_type] > 0:
+                    if res_type in self.claimed_resources_by_supervisor:
                         self.claimed_resources_by_supervisor[res_type] -= 1
 
-                if task_details_for_report.get('worker_id') == worker_id:
-                    if task_type == 'explore_area':
-                        explore_target = task_details_for_report.get('target_pos',
-                                                                     task_details_for_report.get('path_to_explore',
-                                                                                                 [None])[0])
-                        print(
-                            f"LOG: Cleaning up Hotspot task. Discarding target: {explore_target} from pending_exploration_targets.")
-                        if explore_target: self.pending_exploration_targets.discard(explore_target)
-
-                    elif task_type == 'explore_corridor':
-                        corridor_path_reported = task_details_for_report.get('corridor_path', [])
-                        print(
-                            f"LOG: Cleaning up single Corridor task. Discarding {len(corridor_path_reported)} cells from pending_exploration_targets.")
-                        for cell in corridor_path_reported:
-                            self.pending_exploration_targets.discard(cell)
-
-                    elif task_type == 'execute_corridor_tour':
-                        cleaned_paths = 0
-                        tour_steps = task_details_for_report.get('tour_steps', [])
-                        print(
-                            f"LOG: Cleaning up Corridor Tour task {task_id_in_report}. Contains {len(tour_steps)} sub-tasks.")
-                        for sub_task in tour_steps:
-                            corridor_path = sub_task.get('corridor_path', [])
-                            print(
-                                f"LOG:   - Discarding path of length {len(corridor_path)} from pending_exploration_targets.")
-                            for cell in corridor_path:
-                                self.pending_exploration_targets.discard(cell)
-                            cleaned_paths += 1
-                        print(f"LOG: Finished cleaning up {cleaned_paths} paths from tour.")
-
-                    elif task_type == 'collect_resource' and new_worker_state == 'TASK_FAILED':
-                        target_pos = task_details_for_report.get('target_pos')
-                        if target_pos and self.supervisor_known_map[
-                            target_pos[0], target_pos[1]] == SUPERVISOR_CLAIMED_RESOURCE:
-                            self.supervisor_known_map[target_pos[0], target_pos[1]] = map_updates.get(target_pos,
-                                                                                                      EMPTY_EXPLORED)
-                            report_caused_significant_map_change = True
-
-                    if task_id_in_report in self.assigned_tasks:
-                        print(f"LOG: Deleting task {task_id_in_report} from self.assigned_tasks.")
-                        del self.assigned_tasks[task_id_in_report]
-                    else:
-                        print(f"WARN: Tried to delete task {task_id_in_report}, but it was not in self.assigned_tasks.")
-                else:
-                    print(
-                        f"WARN: Worker ID mismatch in report. Report from {worker_id}, but task assigned to {task_details_for_report.get('worker_id')}")
-
-            if report_caused_significant_map_change:
+            if significant_map_change_occurred:
                 self.needs_new_planning = True
-                print(f"LOG: 'needs_new_planning' set to TRUE due to significant map change.")
 
-            if new_worker_state:
-                self.worker_status[worker_id]['state'] = new_worker_state
-                if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED', 'IDLE_AT_SUPERVISOR']:
-                    self.worker_status[worker_id]['current_task_id'] = None
+            # Update des Worker-Status
+            self.worker_status.setdefault(worker_id, {})
+            self.worker_status[worker_id]['state'] = new_worker_state
+            if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED', 'IDLE_AT_SUPERVISOR']:
+                self.worker_status[worker_id]['current_task_id'] = None
 
     def _is_target_already_assigned_or_queued(self, target_pos_to_check, task_type, resource_type=None):
         for task_data in list(self.assigned_tasks.values()) + self.task_queue:
@@ -422,12 +345,14 @@ class SupervisorAgent(mesa.Agent):
         """
         Hauptplanungsfunktion, die proaktiv einen Vorrat an Erkundungsaufgaben erstellt,
         um sicherzustellen, dass alle Worker beschäftigt bleiben.
+
+        KORRIGIERT: Stellt sicher, dass zuerst alle initialen Hotspots als Aufgaben
+        erstellt werden, bevor die reguläre Korridorplanung beginnt.
         """
         print(
             f"LOG [{self.role_id} @ Step {self.model.steps}]: Running _plan_new_tasks. Current task queue: {len(self.task_queue)}")
 
         # --- Ressourcen-Planung (unverändert) ---
-        # ... (Dieser Code-Block bleibt exakt so, wie er war) ...
         collect_tasks_added_now = 0
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
         for task_data in self.assigned_tasks.values():
@@ -435,6 +360,8 @@ class SupervisorAgent(mesa.Agent):
                 res_type = task_data.get('resource_type')
                 if res_type in self.claimed_resources_by_supervisor:
                     self.claimed_resources_by_supervisor[res_type] += 1
+
+        # Bereinigen der Task-Warteschlange von nicht mehr benötigten Sammelaufgaben
         new_task_queue = []
         for task_data in self.task_queue:
             if task_data.get('type') == 'collect_resource':
@@ -446,6 +373,8 @@ class SupervisorAgent(mesa.Agent):
             else:
                 new_task_queue.append(task_data)
         self.task_queue = new_task_queue
+
+        # Planung neuer Sammelaufgaben
         resource_priority = sorted(self.resource_goals.keys(), key=lambda r: (
                 self.resource_goals[r] - self.model.base_resources_collected.get(r, 0)), reverse=True)
         for res_type in resource_priority:
@@ -472,7 +401,7 @@ class SupervisorAgent(mesa.Agent):
 
         # --- KORRIGIERTE ZWEI-PHASEN-ERKUNDUNGSPLANUNG ---
 
-        # Phase 1: Hotspot-Verteilung (unverändert)
+        # Phase 1: Hotspot-Verteilung (stellt sicher, dass alle Hotspots zuerst zugewiesen werden)
         if self.initial_hotspots_abs:
             print(f"LOG: Phase 1: Planning Hotspots. Remaining: {len(self.initial_hotspots_abs)}")
             for hotspot_pos in list(self.initial_hotspots_abs):
@@ -483,15 +412,17 @@ class SupervisorAgent(mesa.Agent):
                         'is_initial_hotspot_task': True, 'status': 'pending_assignment'
                     }
                     self.task_queue.insert(0, new_hotspot_task)
-                    self.initial_hotspots_abs.remove(hotspot_pos)
+                    self.initial_hotspots_abs.remove(
+                        hotspot_pos)  # Entferne den Hotspot, nachdem eine Aufgabe erstellt wurde
             print(f"LOG: Finished planning all initial Hotspots. Queue size is now {len(self.task_queue)}.")
+            # Beende die Planung für diesen Schritt hier, um die Hotspot-Zuweisung zu priorisieren
             return
 
-        # Phase 2: Korridor-Bündel - mit proaktiver Vorratsplanung
+        # Phase 2: Korridor-Bündel - wird nur ausgeführt, wenn keine Hotspots mehr übrig sind
         print(f"LOG: Phase 2: Considering Corridor Bundles.")
         should_explore_actively = self._check_if_exploration_is_needed()
         if should_explore_actively:
-            # NEUE LOGIK: Berechne, wie viele Aufgaben fehlen, um den Vorrat aufzufüllen.
+            # Berechne, wie viele Aufgaben fehlen, um einen Vorrat für alle Agenten zu haben
             num_active_and_queued_tasks = len(self.assigned_tasks) + len(self.task_queue)
             num_tasks_to_plan = self.model.num_agents_val - num_active_and_queued_tasks
 
@@ -513,33 +444,16 @@ class SupervisorAgent(mesa.Agent):
     def _get_all_assigned_targets(self):
         """Sammelt alle Ziele, die aktuell zugewiesen oder in der Warteschlange sind."""
         targets = set()
-
-        # KORRIGIERTE ZEILE: Greift nur noch auf die aktiven und die in der Warteschlange befindlichen Aufgaben zu.
-        all_tasks = list(self.assigned_tasks.values()) + self.task_queue
+        all_tasks = list(self.assigned_tasks.values()) + self.task_queue + list(self._tasks_to_assign_to_worker.values())
 
         for task_data in all_tasks:
             task_type = task_data.get('type')
             if task_type == 'execute_corridor_tour':
-                # Geht durch die Sub-Aufgaben in einer Tour
                 for step in task_data.get('tour_steps', []):
-                    # Fügt den Startpunkt des Korridors hinzu
                     entry_pos = step.get('entry_pos')
-                    if entry_pos:
-                        targets.add(entry_pos)
-            elif task_type == 'explore_corridor':
-                # Fügt den Startpunkt eines einzelnen Korridors hinzu
-                entry_pos = task_data.get('entry_pos')
-                if entry_pos:
-                    targets.add(entry_pos)
+                    if entry_pos: targets.add(entry_pos)
             elif task_data.get('target_pos'):
-                # Fügt das Ziel für andere Aufgabentypen hinzu (z.B. collect_resource oder explore_area)
                 targets.add(task_data.get('target_pos'))
-            elif task_data.get('path_to_explore'):
-                # Fügt das Ziel für Hotspot-Aufgaben hinzu
-                path = task_data.get('path_to_explore')
-                if path:
-                    targets.add(path[0])
-
         return targets
     # NEUE FUNKTION
     def _plan_corridor_tours(self, max_tours_to_plan):
@@ -825,31 +739,87 @@ class SupervisorAgent(mesa.Agent):
                     q.append((next_pos, depth + 1))
         return potential_unknown_count
 
+    def _prepare_tasks_for_assignment(self):
+        if not self.task_queue: return
+        idle_workers = []
+        for worker_id, status_data in self.worker_status.items():
+            is_busy = worker_id in self._tasks_to_assign_to_worker or \
+                      (status_data.get('current_task_id') and status_data.get(
+                          'current_task_id') in self.assigned_tasks)
+            if status_data.get('state') == 'IDLE_AT_SUPERVISOR' and not is_busy: idle_workers.append(worker_id)
+        if not idle_workers: return
+        self.model.random.shuffle(idle_workers)
+        for worker_id in idle_workers:
+            if not self.task_queue: break
+            task_to_assign = self.task_queue.pop(0)
+            task_to_assign['status'] = 'assigned_pending_pickup'
+            self._tasks_to_assign_to_worker[worker_id] = task_to_assign
+
     def receive_report_from_worker(self, worker_id, report_type, data):
         self._pending_worker_reports.append({'worker_id': worker_id, 'report_type': report_type, 'data': data})
 
     def request_task_from_worker(self, worker_id):
         """
-        Nimmt eine Anfrage von einem Worker entgegen und gibt die nächste verfügbare Aufgabe
-        aus der Haupt-Warteschlange zurück (First-Come, First-Served).
+        Vergibt eine Aufgabe an einen Worker und inkrementiert den Zähler für beanspruchte Ressourcen,
+        wenn es sich um eine Sammelaufgabe handelt.
         """
         self.worker_status.setdefault(worker_id, {})['state'] = 'IDLE_AT_SUPERVISOR'
         self.worker_status[worker_id]['current_task_id'] = None
 
-        # Prüfe, ob Aufgaben in der Haupt-Warteschlange verfügbar sind
-        if self.task_queue:
-            # Nimm die nächste Aufgabe aus der Queue
-            task = self.task_queue.pop(0)
-
-            # Führe die Zuweisungslogik direkt hier aus
+        if worker_id in self._tasks_to_assign_to_worker:
+            task = self._tasks_to_assign_to_worker.pop(worker_id)
             task['status'] = 'assigned'
             task['worker_id'] = worker_id
             self.assigned_tasks[task['task_id']] = task
             self.worker_status[worker_id]['current_task_id'] = task['task_id']
 
-            print(f"SUCCESS: Assigned Task {task.get('task_id')} (Type: {task.get('type')}) to Worker {worker_id}.")
+            task_type_assigned = task.get('type')
+            log_target_info = "N/A"
+
+            # Inkrementiere claimed_resources_by_supervisor, wenn eine collect_resource-Aufgabe zugewiesen wird
+            if task_type_assigned == 'collect_resource':
+                res_type = task.get('resource_type')
+                if res_type in self.claimed_resources_by_supervisor:
+                    self.claimed_resources_by_supervisor[res_type] += 1
+                log_target_info = f"Resource at {task.get('target_pos')} (Type: {res_type})"
+                # NEU: Log, wenn eine Ressource als 'beansprucht' markiert wird
+                #print(
+                    #f"[S_AGENT {self.role_id}] - Assigned task {task['task_id']} ({res_type}) to Worker {worker_id}. Incrementing claimed. Current claimed: {self.claimed_resources_by_supervisor}")
+
+
+            elif task_type_assigned == 'execute_tour':
+                tour_steps = task.get('tour_steps', [])
+                log_target_info = f"Tour mit {len(tour_steps)} Schritten. Ziele: {[step['target_pos'] for step in tour_steps]}"
+                for step in tour_steps:
+                    target_for_projection = step.get('target_pos')
+                    if target_for_projection:
+                        projected_cells = self._get_projected_explored_cells(target_for_projection,
+                                                                             self.model.agent_vision_radius_val)
+                        for cell_px, cell_py in projected_cells:
+                            if 0 <= cell_px < self.model.grid_width_val and 0 <= cell_py < self.model.grid_height_val:
+                                if self.supervisor_exploration_logistics_map[cell_px, cell_py] == UNKNOWN:
+                                    self.supervisor_exploration_logistics_map[
+                                        cell_px, cell_py] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED
+
+            elif task_type_assigned == 'explore_area':
+                target_for_projection = task.get('target_pos')
+                log_target_info = f"Area at {target_for_projection}"
+                if target_for_projection:
+                    projected_cells = self._get_projected_explored_cells(target_for_projection,
+                                                                         self.model.agent_vision_radius_val)
+                    for cell_px, cell_py in projected_cells:
+                        if 0 <= cell_px < self.model.grid_width_val and 0 <= cell_py < self.model.grid_height_val:
+                            if self.supervisor_exploration_logistics_map[cell_px, cell_py] == UNKNOWN:
+                                self.supervisor_exploration_logistics_map[
+                                    cell_px, cell_py] = SUPERVISOR_LOGISTICS_EXPLORATION_TARGETED
+            elif task_type_assigned == 'explore_corridor':
+                corridor_path = task.get('corridor_path', [])
+                entry_pos = task.get('entry_pos')
+                log_target_info = f"Corridor from {entry_pos} via path (len {len(corridor_path)})"
+                if corridor_path:
+                    task_viz_info = {'entry_U': corridor_path[0], 'end_U': corridor_path[-1]}
+                    self.active_corridors_viz[task['task_id']] = task_viz_info
+
             return task
 
-        # LOG: Wenn keine Aufgabe verfügbar ist
-        print(f"INFO: Worker {worker_id} requested a task, but the task_queue is empty.")
         return None
