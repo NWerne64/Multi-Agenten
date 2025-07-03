@@ -28,6 +28,7 @@ class WorkerAgent(mesa.Agent):
         self.current_tour_step_index = 0
         self.current_sub_task = None
         self.is_current_task_initial_hotspot = False
+        self.last_completed_task_id = None
 
     def _manhattan_distance(self, pos1, pos2):
         if pos1 is None or pos2 is None: return float('inf')
@@ -98,17 +99,16 @@ class WorkerAgent(mesa.Agent):
                 if self.pos == self.supervisor_home_pos and self.model.steps % 10 == self.unique_id % 10:
                     self._report_and_request_new_task()
 
-        # NEU: Zustand für die initialen Hotspot-Aufgaben
+        # Logik für Hotspots
         elif self.state == "MOVING_TO_EXPLORE_HOTSPOT":
             if self.current_task is None: self._task_failed_or_issue("no_hotspot_task"); return
-
             target_waypoint = self.current_task['path_to_explore'][0]
             if self.pos == target_waypoint:
-                self._task_completed()  # Hotspot erreicht, Aufgabe erfüllt
+                self._task_completed()
             else:
                 self._move_towards(target_waypoint)
 
-        # Logik für Korridor-Touren (unverändert)
+        # Logik für Korridor-Touren
         elif self.state == "EXECUTING_CORRIDOR_TOUR":
             if self.current_sub_task is None:
                 if self.current_tour_step_index >= len(self.current_tour_steps):
@@ -123,7 +123,7 @@ class WorkerAgent(mesa.Agent):
             if self.current_sub_task is None: self._task_failed_or_issue("no_active_corridor_sub_task"); return
             target_entry_pos = self.current_sub_task.get('entry_pos')
             if self.pos == target_entry_pos:
-                self.state = "FOLLOWING_CORRIDOR_PATH";
+                self.state = "FOLLOWING_CORridor_PATH";
                 self.current_corridor_path_index = 0
             else:
                 self._move_towards(target_entry_pos)
@@ -141,6 +141,40 @@ class WorkerAgent(mesa.Agent):
                 self.current_corridor_path_index += 1
             else:
                 self._move_towards(target_waypoint)
+
+        # --- NEU: Hinzugefügte Logik für das Sammeln von Ressourcen ---
+        elif self.state == "MOVING_TO_COLLECT_TARGET":
+            if self.current_task is None: self.state = "IDLE"; return
+            target = self.current_task['target_pos']
+            if self.pos == target:
+                self.state = "COLLECTING_AT_TARGET"
+            else:
+                self._move_towards(target)
+
+        elif self.state == "COLLECTING_AT_TARGET":
+            if self.current_task is None: self.state = "IDLE"; return
+            target_pos = self.current_task['target_pos']
+            if self.inventory_slot is None and target_pos in self.model.resources_on_grid:
+                resource_data = self.model.resources_on_grid.pop(target_pos)
+                self.inventory_slot = {'type': resource_data['type']}
+                self.worker_internal_map[target_pos[0], target_pos[1]] = RESOURCE_COLLECTED_BY_ME
+                self.newly_observed_map_segment[target_pos] = RESOURCE_COLLECTED_BY_ME
+                self.state = "MOVING_TO_BASE_FOR_TASK_DELIVERY"
+            else:
+                if target_pos not in self.model.resources_on_grid:
+                    self.worker_internal_map[target_pos[0], target_pos[1]] = EMPTY_EXPLORED
+                    self.newly_observed_map_segment[target_pos] = EMPTY_EXPLORED
+                self._task_failed_or_issue("collect_failed")
+
+        elif self.state == "MOVING_TO_BASE_FOR_TASK_DELIVERY":
+            if self.pos == self.model.base_deposit_point:
+                if self.inventory_slot:
+                    res_type = self.inventory_slot['type']
+                    self.model.base_resources_collected[res_type] += 1
+                    self.inventory_slot = None
+                self._task_completed()
+            else:
+                self._move_towards(self.model.base_deposit_point)
 
     # MODIFIZIERT: Die set_task Methode erkennt den neuen Tour-Typ
     def set_task(self, task_details):
@@ -167,36 +201,71 @@ class WorkerAgent(mesa.Agent):
             else:
                 self._task_failed_or_issue("unhandled_explore_area")
 
+        # --- NEU: Hinzugefügte Bedingung für Sammel-Aufgaben ---
         elif task_type == 'collect_resource':
             self.state = "MOVING_TO_COLLECT_TARGET"
 
         else:
+            # Fallback für unbekannte Aufgabentypen
             self.state = "IDLE"
 
     # Die restlichen Methoden bleiben unverändert
     def _report_and_request_new_task(self):
         if self.pos != self.supervisor_home_pos:
-            if self.state != "MOVING_TO_SUPERVISOR": self.state = "MOVING_TO_SUPERVISOR"
+            self.state = "MOVING_TO_SUPERVISOR"
             return
 
+        # Erstelle das Grundgerüst des Berichts
         report_data = {
-            'status': 'IDLE_AT_SUPERVISOR', 'current_pos': self.pos,
+            'worker_id': self.unique_id,
+            'current_pos': self.pos,
             'inventory': self.inventory_slot,
             'map_segment_updates': self.newly_observed_map_segment.copy()
         }
-        self.model.submit_report_to_supervisor(self.unique_id, 'status_and_map_update', report_data)
+
+        # NEUE LOGIK: Entscheide, welche Art von Bericht gesendet wird
+        if self.last_completed_task_id:
+            # Wenn eine Aufgabe abgeschlossen wurde, melde dies explizit
+            report_data['status'] = 'TASK_COMPLETED'
+            report_data['task_id'] = self.last_completed_task_id
+        else:
+            # Ansonsten ist es nur eine normale "Ich bin untätig"-Meldung
+            report_data['status'] = 'IDLE_AT_SUPERVISOR'
+            report_data['task_id'] = None
+
+        # Sende den Bericht an den Supervisor
+        self.model.submit_report_to_supervisor(self.unique_id, 'status_update', report_data)
+
+        # Setze die Erinnerung und die neuen Kartendaten zurück, nachdem der Bericht gesendet wurde
+        self.last_completed_task_id = None
         self.newly_observed_map_segment.clear()
 
+        # Fordere eine neue Aufgabe an
         new_task = self.model.request_task_from_supervisor(self.unique_id)
         if new_task:
             self.set_task(new_task)
         else:
+            # Wenn es keine neue Aufgabe gibt, warte hier
             self.state = "AWAITING_TASK"
 
     def _task_completed(self):
+        # LOG: Bestätigt, dass die Aufgabe intern als erledigt gilt
+        print(
+            f"LOG: Worker {self.display_id} completed task {self.current_task.get('task_id') if self.current_task else 'None'}. Heading home.")
+
+        # NEU: Merke dir die ID der abgeschlossenen Aufgabe
+        if self.current_task:
+            self.last_completed_task_id = self.current_task.get('task_id')
+
+        # Setze die aktuellen Aufgaben-Attribute zurück
         self.current_task = None
         self.current_sub_task = None
-        # ... weitere Resets ...
+        self.current_tour_steps = []
+        self.current_tour_step_index = 0
+        self.current_corridor_path = []
+        self.current_corridor_path_index = 0
+
+        # Gehe zum Supervisor, um Bericht zu erstatten
         self.state = "MOVING_TO_SUPERVISOR"
 
     def _task_failed_or_issue(self, reason="unknown"):
