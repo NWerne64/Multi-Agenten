@@ -343,16 +343,34 @@ class SupervisorAgent(mesa.Agent):
 
     def _plan_new_tasks(self):
         """
-        Hauptplanungsfunktion, die proaktiv einen Vorrat an Erkundungsaufgaben erstellt,
-        um sicherzustellen, dass alle Worker beschäftigt bleiben.
-
-        KORRIGIERT: Stellt sicher, dass zuerst alle initialen Hotspots als Aufgaben
-        erstellt werden, bevor die reguläre Korridorplanung beginnt.
+        Kombiniert die effektive Erkundungsplanung mit einem stabilen Start.
+        1. Führt zuerst die initiale Hotspot-Planung durch.
+        2. Fährt dann mit der bewährten Ressourcen- und Korridor-Planung fort.
         """
         print(
             f"LOG [{self.role_id} @ Step {self.model.steps}]: Running _plan_new_tasks. Current task queue: {len(self.task_queue)}")
 
-        # --- Ressourcen-Planung (unverändert) ---
+        # --- PHASE 1: INITALE ANKERPUNKTE (HOTSPOTS) ---
+        # Dieser Block stellt sicher, dass die allerersten Aufgaben die Ankerpunkte sind.
+        if self.initial_hotspots_abs:
+            print(f"LOG [Supervisor]: Phase 1: Planning initial Hotspots.")
+            for hotspot_pos in list(self.initial_hotspots_abs):
+                if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):
+                    new_hotspot_task = {
+                        'task_id': f"task_hotspot_{next(self.task_id_counter)}",
+                        'type': 'explore_area',
+                        'path_to_explore': [hotspot_pos],
+                        'is_initial_hotspot_task': True,  # Wichtig für den Worker
+                        'status': 'pending_assignment'
+                    }
+                    self.task_queue.append(new_hotspot_task)
+            self.initial_hotspots_abs.clear()
+            print(f"LOG [Supervisor]: Finished planning Hotspots. Queue size now {len(self.task_queue)}.")
+            # **KRITISCHE KORREKTUR:** Beende die Planung hier, damit die Hotspots zuerst geholt werden.
+            return
+
+            # --- PHASE 2: DEINE BEWÄHRTE RESSOURCEN- UND ERKUNDUNGSPLANUNG ---
+        # Der Rest der Funktion ist exakt so, wie von dir gewünscht.
         collect_tasks_added_now = 0
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
         for task_data in self.assigned_tasks.values():
@@ -361,7 +379,6 @@ class SupervisorAgent(mesa.Agent):
                 if res_type in self.claimed_resources_by_supervisor:
                     self.claimed_resources_by_supervisor[res_type] += 1
 
-        # Bereinigen der Task-Warteschlange von nicht mehr benötigten Sammelaufgaben
         new_task_queue = []
         for task_data in self.task_queue:
             if task_data.get('type') == 'collect_resource':
@@ -374,7 +391,6 @@ class SupervisorAgent(mesa.Agent):
                 new_task_queue.append(task_data)
         self.task_queue = new_task_queue
 
-        # Planung neuer Sammelaufgaben
         resource_priority = sorted(self.resource_goals.keys(), key=lambda r: (
                 self.resource_goals[r] - self.model.base_resources_collected.get(r, 0)), reverse=True)
         for res_type in resource_priority:
@@ -399,47 +415,36 @@ class SupervisorAgent(mesa.Agent):
                 if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
-        # --- KORRIGIERTE ZWEI-PHASEN-ERKUNDUNGSPLANUNG ---
-
-        # Phase 1: Hotspot-Verteilung (stellt sicher, dass alle Hotspots zuerst zugewiesen werden)
-        if self.initial_hotspots_abs:
-            print(f"LOG: Phase 1: Planning Hotspots. Remaining: {len(self.initial_hotspots_abs)}")
-            for hotspot_pos in list(self.initial_hotspots_abs):
-                if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):
-                    new_hotspot_task = {
-                        'task_id': f"task_hotspot_{next(self.task_id_counter)}",
-                        'type': 'explore_area', 'path_to_explore': [hotspot_pos],
-                        'is_initial_hotspot_task': True, 'status': 'pending_assignment'
-                    }
-                    self.task_queue.insert(0, new_hotspot_task)
-                    self.initial_hotspots_abs.remove(
-                        hotspot_pos)  # Entferne den Hotspot, nachdem eine Aufgabe erstellt wurde
-            print(f"LOG: Finished planning all initial Hotspots. Queue size is now {len(self.task_queue)}.")
-            # Beende die Planung für diesen Schritt hier, um die Hotspot-Zuweisung zu priorisieren
-            return
-
-        # Phase 2: Korridor-Bündel - wird nur ausgeführt, wenn keine Hotspots mehr übrig sind
-        print(f"LOG: Phase 2: Considering Corridor Bundles.")
+        # Proaktive Korridor-Planung
         should_explore_actively = self._check_if_exploration_is_needed()
         if should_explore_actively:
-            # Berechne, wie viele Aufgaben fehlen, um einen Vorrat für alle Agenten zu haben
-            num_active_and_queued_tasks = len(self.assigned_tasks) + len(self.task_queue)
-            num_tasks_to_plan = self.model.num_agents_val - num_active_and_queued_tasks
-
-            print(f"LOG: Active+Queued Tasks: {num_active_and_queued_tasks}. Num Agents: {self.model.num_agents_val}.")
-            print(f"LOG: Planning to create {num_tasks_to_plan} new bundle(s) to fill the stockpile.")
-
+            num_queued_tasks = len(self.task_queue)
+            num_tasks_to_plan = self.model.num_agents_val - num_queued_tasks
             if num_tasks_to_plan > 0:
-                tasks_planned = self._plan_corridor_bundles(max_bundles_to_plan=num_tasks_to_plan)
-                print(f"LOG: Actually planned {tasks_planned} new corridor bundles.")
-                if tasks_planned == 0:
-                    self.no_normal_target_found_count += 1
-                    print(
-                        f"LOG: No new bundles could be planned. No-target-found count: {self.no_normal_target_found_count}")
-                else:
-                    self.no_normal_target_found_count = 0
-        else:
-            print("LOG: Exploration is not currently needed.")
+                self._plan_corridor_bundles(max_bundles_to_plan=num_tasks_to_plan)
+
+    def get_task_for_worker(self, worker_id):
+        """
+        Diese Funktion wird von Workern aufgerufen, um eine neue Aufgabe
+        aus der Warteschlange zu erhalten.
+
+        Sie ist das entscheidende Bindeglied zwischen der Planungslogik
+        des Supervisors und der Ausführung durch die Worker.
+        """
+        if not self.task_queue:
+            print(f"LOG [Supervisor]: Worker {worker_id} requested a task, but the queue is empty.")
+            return None
+
+        # Nimm die nächste Aufgabe aus der Warteschlange (von vorne, da Sammelaufgaben dort eingefügt werden)
+        task_to_assign = self.task_queue.pop(0)
+
+        # Aktualisiere den Status und speichere die Aufgabe als "zugewiesen"
+        task_to_assign['status'] = 'assigned'
+        self.assigned_tasks[worker_id] = task_to_assign
+
+        print(
+            f"LOG [Supervisor]: Assigning task {task_to_assign.get('task_id')} to worker {worker_id}. Queue length now: {len(self.task_queue)}")
+        return task_to_assign
 
     def _get_all_assigned_targets(self):
         """Sammelt alle Ziele, die aktuell zugewiesen oder in der Warteschlange sind."""

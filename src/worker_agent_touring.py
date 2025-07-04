@@ -29,6 +29,7 @@ class WorkerAgent(mesa.Agent):
         self.current_sub_task = None
         self.is_current_task_initial_hotspot = False
 
+
     def _manhattan_distance(self, pos1, pos2):
         if pos1 is None or pos2 is None: return float('inf')
         return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
@@ -83,95 +84,135 @@ class WorkerAgent(mesa.Agent):
 
     # MODIFIZIERT: Die Haupt-Zustandsmaschine wird um die Korridor-Touren erweitert
     def _execute_fsm(self):
+        """
+        Stellt die ursprüngliche, detaillierte Zustandslogik wieder her,
+        um eine robuste Erkundung und Aufgabenbearbeitung zu gewährleisten.
+        """
+        previous_state = self.state
+
+        # --- Standard-Zustände ---
         if self.state == "IDLE":
             self.state = "MOVING_TO_SUPERVISOR"
-
         elif self.state == "MOVING_TO_SUPERVISOR":
             if self.pos == self.supervisor_home_pos:
-                self.state = "AWAITING_TASK"
                 self._report_and_request_new_task()
+                if not self.current_task: self.state = "AWAITING_TASK"
             else:
                 self._move_towards(self.supervisor_home_pos)
-
         elif self.state == "AWAITING_TASK":
             if not self.current_task:
-                if self.pos == self.supervisor_home_pos and self.model.steps % 10 == self.unique_id % 10:
+                if self.pos == self.supervisor_home_pos and self.model.steps % 5 == self.unique_id % 5:
                     self._report_and_request_new_task()
+            return
 
-        # NEU: Zustand für die initialen Hotspot-Aufgaben
+        # --- Logik für initiale Ankerpunkte (Hotspots) ---
         elif self.state == "MOVING_TO_EXPLORE_HOTSPOT":
             if self.current_task is None: self._task_failed_or_issue("no_hotspot_task"); return
-
             target_waypoint = self.current_task['path_to_explore'][0]
             if self.pos == target_waypoint:
                 self._task_completed()  # Hotspot erreicht, Aufgabe erfüllt
             else:
                 self._move_towards(target_waypoint)
 
-        # Logik für Korridor-Touren (unverändert)
+        # --- Detaillierte Logik für Korridor-Touren ---
         elif self.state == "EXECUTING_CORRIDOR_TOUR":
-            if self.current_sub_task is None:
-                if self.current_tour_step_index >= len(self.current_tour_steps):
-                    self._task_completed();
-                    return
-                self.current_sub_task = self.current_tour_steps[self.current_tour_step_index]
-                self.current_corridor_path = self.current_sub_task.get('corridor_path', [])
-                self.current_corridor_path_index = 0
-                self.state = "MOVING_TO_CORRIDOR_ENTRY"
+            # Prüfe, ob die gesamte Tour (alle Korridore) fertig ist
+            if self.current_tour_step_index >= len(self.current_tour_steps):
+                self._task_completed()
+                return
+
+            # Nimm den nächsten Korridor aus der Tour und bereite ihn vor
+            self.current_sub_task = self.current_tour_steps[self.current_tour_step_index]
+            self.current_corridor_path = self.current_sub_task.get('corridor_path', [])
+            self.current_corridor_path_index = 0
+            self.state = "MOVING_TO_CORRIDOR_ENTRY"
 
         elif self.state == "MOVING_TO_CORRIDOR_ENTRY":
             if self.current_sub_task is None: self._task_failed_or_issue("no_active_corridor_sub_task"); return
             target_entry_pos = self.current_sub_task.get('entry_pos')
             if self.pos == target_entry_pos:
-                self.state = "FOLLOWING_CORRIDOR_PATH";
-                self.current_corridor_path_index = 0
+                self.state = "FOLLOWING_CORRIDOR_PATH"
             else:
                 self._move_towards(target_entry_pos)
 
         elif self.state == "FOLLOWING_CORRIDOR_PATH":
             if self.current_sub_task is None: self._task_failed_or_issue("no_active_corridor_sub_task"); return
             path = self.current_corridor_path
+            # Prüfe, ob der einzelne Korridor-Pfad fertig ist
             if self.current_corridor_path_index >= len(path):
-                self.current_tour_step_index += 1
+                self.current_tour_step_index += 1  # Gehe zum nächsten Korridor in der Tour
                 self.current_sub_task = None
-                self.state = "EXECUTING_CORRIDOR_TOUR";
+                self.state = "EXECUTING_CORRIDOR_TOUR"  # Gehe zurück zum Tour-Manager
                 return
+
             target_waypoint = path[self.current_corridor_path_index]
             if self.pos == target_waypoint:
                 self.current_corridor_path_index += 1
             else:
                 self._move_towards(target_waypoint)
 
-    # MODIFIZIERT: Die set_task Methode erkennt den neuen Tour-Typ
-    def set_task(self, task_details):
-        self.current_task = task_details
-        task_type = self.current_task.get('type')
+        # --- Logik für Ressourcensammlung (unverändert) ---
+        elif self.state == "MOVING_TO_COLLECT_TARGET":
+            target = self.current_task.get('target_pos')
+            if self.pos == target:
+                self.state = "COLLECTING_AT_TARGET"
+            else:
+                self._move_towards(target)
+        elif self.state == "COLLECTING_AT_TARGET":
+            target_pos = self.current_task['target_pos']
+            if self.inventory_slot is None and target_pos in self.model.resources_on_grid:
+                resource_data = self.model.resources_on_grid.pop(target_pos)
+                self.inventory_slot = {'type': resource_data['type']}
+                self.state = "MOVING_TO_BASE_FOR_TASK_DELIVERY"
+            else:
+                self._task_failed_or_issue("resource_not_found_or_inv_full")
+        elif self.state == "MOVING_TO_BASE_FOR_TASK_DELIVERY":
+            base_target = self.model.base_deposit_point
+            if self.pos == base_target:
+                if self.inventory_slot:
+                    self.model.base_resources_collected[self.inventory_slot['type']] += 1
+                    self.inventory_slot = None
+                self._task_completed()
+            else:
+                self._move_towards(base_target)
 
-        # Reset der Attribute
-        self.current_corridor_path = []
-        self.current_corridor_path_index = 0
+        # Debug-Ausgabe
+        if self.state != previous_state:
+            print(
+                f"DEBUG [Worker {self.unique_id} @ Step {self.model.steps}]: State changed from {previous_state} -> {self.state}")
+
+    def set_task(self, task_details):
+        """
+        Setzt die Zustände korrekt für die detaillierte FSM.
+        """
+        self.current_task = task_details
+
+        # Setze alle aufgabenspezifischen Variablen zurück
         self.current_tour_steps = []
         self.current_tour_step_index = 0
+        self.current_corridor_path = []
+        self.current_corridor_path_index = 0
         self.current_sub_task = None
-        self.is_current_task_initial_hotspot = False
+        self.inventory_slot = None
 
-        if task_type == 'execute_corridor_tour':
+        if not task_details:
+            self.state = "AWAITING_TASK"
+            return
+
+        task_type = self.current_task.get('type')
+        print(f"DEBUG [Worker {self.unique_id}]: Set new task {self.current_task.get('task_id')} of type {task_type}")
+
+        if task_type == 'explore_area':
+            # Dies ist der Zustand für die initialen Ankerpunkte (Hotspots)
+            self.state = "MOVING_TO_EXPLORE_HOTSPOT"
+        elif task_type == 'execute_corridor_tour':
+            # Dies startet die komplexe Korridor-Logik
             self.state = "EXECUTING_CORRIDOR_TOUR"
             self.current_tour_steps = self.current_task.get('tour_steps', [])
-            if not self.current_tour_steps: self._task_failed_or_issue("corridor_bundle_empty")
-
-        elif task_type == 'explore_area':
-            self.is_current_task_initial_hotspot = self.current_task.get('is_initial_hotspot_task', False)
-            if self.is_current_task_initial_hotspot:
-                self.state = "MOVING_TO_EXPLORE_HOTSPOT"
-            else:
-                self._task_failed_or_issue("unhandled_explore_area")
-
         elif task_type == 'collect_resource':
             self.state = "MOVING_TO_COLLECT_TARGET"
-
         else:
-            self.state = "IDLE"
+            self._task_failed_or_issue(f"unknown_task_type_{task_type}")
 
     # Die restlichen Methoden bleiben unverändert
     def _report_and_request_new_task(self):
