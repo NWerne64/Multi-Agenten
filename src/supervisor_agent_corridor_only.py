@@ -244,6 +244,10 @@ class SupervisorAgent(mesa.Agent):
         self._prepare_tasks_for_assignment()
 
     def _process_pending_reports(self):
+        """
+        FINALE VERSION: Schützt 'geclaimte' Ressourcen vor falscher Bestätigung,
+        erlaubt aber explizit die Aktualisierung zu 'leer', wenn sie abgebaut wurden.
+        """
         if not self._pending_worker_reports: return
         reports_to_process = list(self._pending_worker_reports)
         self._pending_worker_reports.clear()
@@ -257,7 +261,7 @@ class SupervisorAgent(mesa.Agent):
             task_details_for_report = self.assigned_tasks.get(task_id_in_report) if task_id_in_report else None
             new_worker_state = data.get('status')
 
-            # Update der Karte, wenn der Worker bei der Basis ist
+            # Update der Karte durch die Sicht des Workers
             map_updates = data.get('map_segment_updates', {})
             if map_updates:
                 for pos, reported_state in map_updates.items():
@@ -265,9 +269,20 @@ class SupervisorAgent(mesa.Agent):
                     if not (0 <= px < self.model.grid_width_val and 0 <= py < self.model.grid_height_val): continue
 
                     original_known_map_value = self.supervisor_known_map[px, py]
-                    new_public_state = original_known_map_value
 
-                    # Logik zur Aktualisierung des Kartenzustands (vereinfacht)
+                    # --- HIER IST DIE FINALE, VERFEINERTE KORREKTUR ---
+                    # Wenn der Supervisor diese Ressource als "geclaimed" markiert hat...
+                    if original_known_map_value == SUPERVISOR_CLAIMED_RESOURCE:
+                        # ...und ein anderer Agent meldet, dass er sie immer noch sieht...
+                        if reported_state == WOOD_SEEN or reported_state == STONE_SEEN:
+                            # ...dann ignoriere diese Meldung, um den Claim zu schützen.
+                            continue
+                        # Wenn der Agent jedoch meldet, dass die Zelle leer ist (reported_state == EMPTY_EXPLORED),
+                        # wird der 'continue' nicht ausgelöst und die Zelle kann unten korrekt aktualisiert werden.
+                    # ---------------------------------------------
+
+                    # Deine bestehende Logik zur Aktualisierung (unverändert)
+                    new_public_state = original_known_map_value
                     if reported_state in [WOOD_SEEN, STONE_SEEN, EMPTY_EXPLORED, BASE_KNOWN]:
                         if original_known_map_value != reported_state:
                             new_public_state = reported_state
@@ -278,35 +293,32 @@ class SupervisorAgent(mesa.Agent):
                         self.supervisor_known_map[px, py] = new_public_state
                         significant_map_change_occurred = True
 
-                    # Logik zur Aktualisierung der Logistikkarte
                     if new_public_state in [EMPTY_EXPLORED, BASE_KNOWN]:
                         if self.supervisor_exploration_logistics_map[px, py] != SUPERVISOR_LOGISTICS_KNOWN_PASSABLE:
                             self.supervisor_exploration_logistics_map[px, py] = SUPERVISOR_LOGISTICS_KNOWN_PASSABLE
                             significant_map_change_occurred = True
 
-            # WICHTIG: Bearbeitung des Aufgabenstatus
+            # Die Logik zur Bearbeitung des Aufgabenstatus, die die Karte nach erfolgreichem Abschluss
+            # ebenfalls bereinigt, bleibt als zusätzliche Sicherheitsebene bestehen.
             if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED'] and task_details_for_report:
-                self.needs_new_planning = True  # Eine neue Planung ist nötig
+                self.needs_new_planning = True
+                if new_worker_state == 'TASK_COMPLETED' and task_details_for_report.get('type') == 'collect_resource':
+                    target_pos = task_details_for_report.get('target_pos')
+                    if target_pos and self.supervisor_known_map[
+                        target_pos[0], target_pos[1]] == SUPERVISOR_CLAIMED_RESOURCE:
+                        self.supervisor_known_map[target_pos[0], target_pos[1]] = EMPTY_EXPLORED
+                        print(f"LOG [Supervisor]: Ressource bei {target_pos} als abgebaut markiert (via Task-Status).")
+                        significant_map_change_occurred = True
 
-                # ENTFERNE ABGESCHLOSSENE AUFGABE AUS DER BUCHFÜHRUNG
-                if task_id_in_report in self.assigned_tasks:
-                    print(f"LOG: Task {task_id_in_report} completed/failed. Removing from assigned_tasks.")
-                    del self.assigned_tasks[task_id_in_report]
-
-                # Bereinige Visualisierungsdaten, falls vorhanden
-                if task_id_in_report in self.active_corridors_viz:
-                    del self.active_corridors_viz[task_id_in_report]
-
-                # Gib beanspruchte Ressourcen bei Fehlschlag wieder frei
+                if task_id_in_report in self.assigned_tasks: del self.assigned_tasks[task_id_in_report]
+                if task_id_in_report in self.active_corridors_viz: del self.active_corridors_viz[task_id_in_report]
                 if task_details_for_report.get('type') == 'collect_resource':
                     res_type = task_details_for_report.get('resource_type')
-                    if res_type in self.claimed_resources_by_supervisor:
-                        self.claimed_resources_by_supervisor[res_type] -= 1
+                    if res_type in self.claimed_resources_by_supervisor: self.claimed_resources_by_supervisor[
+                        res_type] -= 1
 
-            if significant_map_change_occurred:
-                self.needs_new_planning = True
+            if significant_map_change_occurred: self.needs_new_planning = True
 
-            # Update des Worker-Status
             self.worker_status.setdefault(worker_id, {})
             self.worker_status[worker_id]['state'] = new_worker_state
             if new_worker_state in ['TASK_COMPLETED', 'TASK_FAILED', 'IDLE_AT_SUPERVISOR']:
@@ -343,15 +355,14 @@ class SupervisorAgent(mesa.Agent):
 
     def _plan_new_tasks(self):
         """
-        Kombiniert die effektive Erkundungsplanung mit einem stabilen Start
-        und einer intelligenten "Planungspause" zur Priorisierung von Ressourcen.
+        FINALE VERSION: Nutzt die robuste Planungs- und Claiming-Logik aus
+        supervisor_agent.py, um doppelte Ressourcen-Aufgaben zu verhindern.
         """
         print(
             f"LOG [{self.role_id} @ Step {self.model.steps}]: Running _plan_new_tasks. Current task queue: {len(self.task_queue)}")
 
         # --- PHASE 1: INITALE ANKERPUNKTE (HOTSPOTS) ---
         if self.initial_hotspots_abs:
-            print(f"LOG [Supervisor]: Phase 1: Planning initial Hotspots.")
             for hotspot_pos in list(self.initial_hotspots_abs):
                 if not self._is_target_already_assigned_or_queued(hotspot_pos, 'explore_area'):
                     new_hotspot_task = {
@@ -363,12 +374,12 @@ class SupervisorAgent(mesa.Agent):
                     }
                     self.task_queue.append(new_hotspot_task)
             self.initial_hotspots_abs.clear()
-            print(f"LOG [Supervisor]: Finished planning Hotspots. Queue size now {len(self.task_queue)}.")
             return
 
-        # --- PHASE 2: RESSOURCEN- UND ERKUNDUNGSPLANUNG ---
+        # --- PHASE 2: ROBUSTE RESSOURCEN-PLANUNG (NACH VORLAGE) ---
         collect_tasks_added_now = 0
-        # (Dein bewährter Code zur Ressourcenplanung bleibt hier 1:1 erhalten)
+
+        # 1. Zähle Claims basierend auf zugewiesenen UND bereits geplanten Aufgaben
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
         for task_data in list(self.assigned_tasks.values()) + self.task_queue:
             if task_data.get('type') == 'collect_resource':
@@ -376,43 +387,61 @@ class SupervisorAgent(mesa.Agent):
                 if res_type in self.claimed_resources_by_supervisor:
                     self.claimed_resources_by_supervisor[res_type] += 1
 
+        # 2. Plane neue Sammelaufgaben für ungedeckten Bedarf
         resource_priority = sorted(self.resource_goals.keys(), key=lambda r: (
                 self.resource_goals.get(r, 0) - self.model.base_resources_collected.get(r, 0)), reverse=True)
+
         for res_type in resource_priority:
-            # (Die komplexe Logik zur Ressourcen-Planung bleibt hier unverändert)
-            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             needed_goal = self.resource_goals.get(res_type, 0)
+
+            # Berechne den aktuellen Claim für diesen Ressourcentyp
             current_claimed = self.claimed_resources_by_supervisor.get(res_type, 0)
-            if current_claimed >= needed_goal: continue
+
+            if self.model.base_resources_collected.get(res_type, 0) + current_claimed >= needed_goal:
+                continue
+
             resource_seen_constant = WOOD_SEEN if res_type == 'wood' else STONE_SEEN
             candidate_patches_coords = []
             rows, cols = np.where(self.supervisor_known_map == resource_seen_constant)
             for r_idx, c_idx in zip(rows, cols): candidate_patches_coords.append((int(r_idx), int(c_idx)))
             self.model.random.shuffle(candidate_patches_coords)
+
             for patch_pos in candidate_patches_coords:
-                if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type): continue
-                if self.claimed_resources_by_supervisor.get(res_type, 0) >= needed_goal: break
-                # Aufgabe wird an den ANFANG der Liste gesetzt und verschiebt alles andere nach hinten.
-                new_collect_task = {'task_id': f"task_collect_{next(self.task_id_counter)}", 'type': 'collect_resource',
-                                    'target_pos': patch_pos, 'resource_type': res_type,
-                                    'status': 'pending_assignment'}
+                # Prüfe, ob Bedarf noch besteht
+                if self.model.base_resources_collected.get(res_type, 0) + self.claimed_resources_by_supervisor.get(
+                        res_type, 0) >= needed_goal:
+                    break
+
+                # Prüfe, ob für dieses Ziel bereits eine Aufgabe existiert
+                if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type):
+                    continue
+
+                # KORREKTUR: Markiere die Ressource SOFORT auf der Karte als "beansprucht"
+                self.supervisor_known_map[patch_pos[0], patch_pos[1]] = SUPERVISOR_CLAIMED_RESOURCE
+
+                new_collect_task = {
+                    'task_id': f"task_collect_{next(self.task_id_counter)}",
+                    'type': 'collect_resource',
+                    'target_pos': patch_pos,
+                    'resource_type': res_type,
+                    'status': 'pending_assignment'
+                }
                 self.task_queue.insert(0, new_collect_task)
+                print(
+                    f"LOG [Supervisor]: Task für {res_type} bei {patch_pos} zur Warteschlange hinzugefügt und auf Karte markiert.")
+
+                # Aktualisiere den Zähler für die laufende Planung
                 self.claimed_resources_by_supervisor[res_type] += 1
                 collect_tasks_added_now += 1
-                if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
-            if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
         # --- DIE INTELLIGENTE PLANUNGSPAUSE ---
-        # Wenn in diesem Schritt Sammelaufgaben erstellt wurden, überspringe die Korridor-Planung.
         if collect_tasks_added_now > 0:
             print(
                 f"LOG [Supervisor]: Prioritized {collect_tasks_added_now} resource task(s). Deferring exploration planning.")
             return
 
         # --- PHASE 3: PROAKTIVE KORRIDOR-PLANUNG ---
-        # Dieser Teil wird nur ausgeführt, wenn KEINE neuen Sammelaufgaben geplant wurden.
-        should_explore_actively = self._check_if_exploration_is_needed()
-        if should_explore_actively:
+        if self._check_if_exploration_is_needed():
             num_queued_tasks = len(self.task_queue)
             num_tasks_to_plan = self.model.num_agents_val - num_queued_tasks
             if num_tasks_to_plan > 0:
@@ -420,25 +449,26 @@ class SupervisorAgent(mesa.Agent):
 
     def get_task_for_worker(self, worker_id):
         """
-        Diese Funktion wird von Workern aufgerufen, um eine neue Aufgabe
-        aus der Warteschlange zu erhalten.
-
-        Sie ist das entscheidende Bindeglied zwischen der Planungslogik
-        des Supervisors und der Ausführung durch die Worker.
+        Verbessert: Markiert eine Ressource als 'geclaimed', sobald die Aufgabe
+        an einen Worker vergeben wird.
         """
         if not self.task_queue:
-            print(f"LOG [Supervisor]: Worker {worker_id} requested a task, but the queue is empty.")
             return None
 
-        # Nimm die nächste Aufgabe aus der Warteschlange (von vorne, da Sammelaufgaben dort eingefügt werden)
         task_to_assign = self.task_queue.pop(0)
 
-        # Aktualisiere den Status und speichere die Aufgabe als "zugewiesen"
+        # NEU: Claim-Logik hier einfügen
+        if task_to_assign.get('type') == 'collect_resource':
+            target_pos = task_to_assign.get('target_pos')
+            if target_pos:
+                print(
+                    f"DEBUG [Supervisor]: Weise Worker {worker_id} die Aufgabe zu, Ressource bei {target_pos} zu sammeln.")
+                self.supervisor_known_map[target_pos[0], target_pos[1]] = SUPERVISOR_CLAIMED_RESOURCE
+                print(f"LOG [Supervisor]: Claimed resource at {target_pos} for worker {worker_id}.")
+
         task_to_assign['status'] = 'assigned'
         self.assigned_tasks[worker_id] = task_to_assign
 
-        print(
-            f"LOG [Supervisor]: Assigning task {task_to_assign.get('task_id')} to worker {worker_id}. Queue length now: {len(self.task_queue)}")
         return task_to_assign
 
     def _get_all_assigned_targets(self):

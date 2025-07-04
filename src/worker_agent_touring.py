@@ -176,11 +176,6 @@ class WorkerAgent(mesa.Agent):
             else:
                 self._move_towards(base_target)
 
-        # Debug-Ausgabe
-        if self.state != previous_state:
-            print(
-                f"DEBUG [Worker {self.unique_id} @ Step {self.model.steps}]: State changed from {previous_state} -> {self.state}")
-
     def set_task(self, task_details):
         """
         Setzt die Zustände korrekt für die detaillierte FSM.
@@ -200,7 +195,6 @@ class WorkerAgent(mesa.Agent):
             return
 
         task_type = self.current_task.get('type')
-        print(f"DEBUG [Worker {self.unique_id}]: Set new task {self.current_task.get('task_id')} of type {task_type}")
 
         if task_type == 'explore_area':
             # Dies ist der Zustand für die initialen Ankerpunkte (Hotspots)
