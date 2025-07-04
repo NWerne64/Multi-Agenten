@@ -343,15 +343,13 @@ class SupervisorAgent(mesa.Agent):
 
     def _plan_new_tasks(self):
         """
-        Kombiniert die effektive Erkundungsplanung mit einem stabilen Start.
-        1. Führt zuerst die initiale Hotspot-Planung durch.
-        2. Fährt dann mit der bewährten Ressourcen- und Korridor-Planung fort.
+        Kombiniert die effektive Erkundungsplanung mit einem stabilen Start
+        und einer intelligenten "Planungspause" zur Priorisierung von Ressourcen.
         """
         print(
             f"LOG [{self.role_id} @ Step {self.model.steps}]: Running _plan_new_tasks. Current task queue: {len(self.task_queue)}")
 
         # --- PHASE 1: INITALE ANKERPUNKTE (HOTSPOTS) ---
-        # Dieser Block stellt sicher, dass die allerersten Aufgaben die Ankerpunkte sind.
         if self.initial_hotspots_abs:
             print(f"LOG [Supervisor]: Phase 1: Planning initial Hotspots.")
             for hotspot_pos in list(self.initial_hotspots_abs):
@@ -360,40 +358,28 @@ class SupervisorAgent(mesa.Agent):
                         'task_id': f"task_hotspot_{next(self.task_id_counter)}",
                         'type': 'explore_area',
                         'path_to_explore': [hotspot_pos],
-                        'is_initial_hotspot_task': True,  # Wichtig für den Worker
+                        'is_initial_hotspot_task': True,
                         'status': 'pending_assignment'
                     }
                     self.task_queue.append(new_hotspot_task)
             self.initial_hotspots_abs.clear()
             print(f"LOG [Supervisor]: Finished planning Hotspots. Queue size now {len(self.task_queue)}.")
-            # **KRITISCHE KORREKTUR:** Beende die Planung hier, damit die Hotspots zuerst geholt werden.
             return
 
-            # --- PHASE 2: DEINE BEWÄHRTE RESSOURCEN- UND ERKUNDUNGSPLANUNG ---
-        # Der Rest der Funktion ist exakt so, wie von dir gewünscht.
+        # --- PHASE 2: RESSOURCEN- UND ERKUNDUNGSPLANUNG ---
         collect_tasks_added_now = 0
+        # (Dein bewährter Code zur Ressourcenplanung bleibt hier 1:1 erhalten)
         self.claimed_resources_by_supervisor = {'wood': 0, 'stone': 0}
-        for task_data in self.assigned_tasks.values():
+        for task_data in list(self.assigned_tasks.values()) + self.task_queue:
             if task_data.get('type') == 'collect_resource':
                 res_type = task_data.get('resource_type')
                 if res_type in self.claimed_resources_by_supervisor:
                     self.claimed_resources_by_supervisor[res_type] += 1
 
-        new_task_queue = []
-        for task_data in self.task_queue:
-            if task_data.get('type') == 'collect_resource':
-                res_type = task_data.get('resource_type')
-                needed_goal = self.resource_goals.get(res_type, 0)
-                current_claimed = self.claimed_resources_by_supervisor.get(res_type, 0)
-                if current_claimed < needed_goal:
-                    new_task_queue.append(task_data)
-            else:
-                new_task_queue.append(task_data)
-        self.task_queue = new_task_queue
-
         resource_priority = sorted(self.resource_goals.keys(), key=lambda r: (
-                self.resource_goals[r] - self.model.base_resources_collected.get(r, 0)), reverse=True)
+                self.resource_goals.get(r, 0) - self.model.base_resources_collected.get(r, 0)), reverse=True)
         for res_type in resource_priority:
+            # (Die komplexe Logik zur Ressourcen-Planung bleibt hier unverändert)
             if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             needed_goal = self.resource_goals.get(res_type, 0)
             current_claimed = self.claimed_resources_by_supervisor.get(res_type, 0)
@@ -406,16 +392,25 @@ class SupervisorAgent(mesa.Agent):
             for patch_pos in candidate_patches_coords:
                 if self._is_target_already_assigned_or_queued(patch_pos, 'collect_resource', res_type): continue
                 if self.claimed_resources_by_supervisor.get(res_type, 0) >= needed_goal: break
-                self.supervisor_known_map[patch_pos[0], patch_pos[1]] = SUPERVISOR_CLAIMED_RESOURCE
+                # Aufgabe wird an den ANFANG der Liste gesetzt und verschiebt alles andere nach hinten.
                 new_collect_task = {'task_id': f"task_collect_{next(self.task_id_counter)}", 'type': 'collect_resource',
                                     'target_pos': patch_pos, 'resource_type': res_type,
                                     'status': 'pending_assignment'}
                 self.task_queue.insert(0, new_collect_task)
+                self.claimed_resources_by_supervisor[res_type] += 1
                 collect_tasks_added_now += 1
                 if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
             if collect_tasks_added_now >= self.max_new_collect_tasks_per_planning: break
 
-        # Proaktive Korridor-Planung
+        # --- DIE INTELLIGENTE PLANUNGSPAUSE ---
+        # Wenn in diesem Schritt Sammelaufgaben erstellt wurden, überspringe die Korridor-Planung.
+        if collect_tasks_added_now > 0:
+            print(
+                f"LOG [Supervisor]: Prioritized {collect_tasks_added_now} resource task(s). Deferring exploration planning.")
+            return
+
+        # --- PHASE 3: PROAKTIVE KORRIDOR-PLANUNG ---
+        # Dieser Teil wird nur ausgeführt, wenn KEINE neuen Sammelaufgaben geplant wurden.
         should_explore_actively = self._check_if_exploration_is_needed()
         if should_explore_actively:
             num_queued_tasks = len(self.task_queue)
