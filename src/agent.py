@@ -77,31 +77,46 @@ class ResourceCollectorAgent(mesa.Agent):
                 self.known_map[cx, cy] = newly_observed_state
 
     def _sync_with_blackboard(self):
+        # Schritt 1: Agent schreibt seine bekannten Informationen auf das Blackboard des Modells
         for r_idx in range(self.model.grid_width_val):
             for c_idx in range(self.model.grid_height_val):
                 agent_knowledge_for_cell = self.known_map[r_idx, c_idx]
                 if agent_knowledge_for_cell != UNKNOWN:
                     self.model.update_blackboard_cell((r_idx, c_idx), agent_knowledge_for_cell)
 
+        # NEUE ZEILE: Kommunikationszähler des Modells inkrementieren
+        # Dies zählt jede Synchronisation mit dem Blackboard als ein Kommunikationsereignis.
+        self.model.communication_counter += 1
+
+        # Schritt 2: Agent aktualisiert seine eigene Karte mit Informationen vom Blackboard des Modells
         for r_idx in range(self.model.grid_width_val):
             for c_idx in range(self.model.grid_height_val):
                 pos = (r_idx, c_idx)
+                # Überspringe Zellen im aktuellen Sichtfeld, da diese direkt wahrgenommen werden
                 if self._is_cell_in_current_vision(pos):
                     continue
+
                 agent_current_cell_knowledge = self.known_map[r_idx, c_idx]
                 blackboard_cell_knowledge = self.model.blackboard_map[r_idx, c_idx]
+
+                # Wenn das Blackboard anzeigt, dass eine Zelle leer und erkundet ist,
+                # übernimmt der Agent diese Information.
                 if blackboard_cell_knowledge == EMPTY_EXPLORED:
                     self.known_map[r_idx, c_idx] = EMPTY_EXPLORED
+                # Wenn der Agent eine Zelle nicht kennt, aber das Blackboard gültige Informationen hat,
+                # übernimmt der Agent diese Information (außer UNKNOWN oder EMPTY_EXPLORED, die bereits oben behandelt wurden).
                 elif agent_current_cell_knowledge == UNKNOWN and \
                         blackboard_cell_knowledge not in [UNKNOWN, EMPTY_EXPLORED]:
                     self.known_map[r_idx, c_idx] = blackboard_cell_knowledge
+                # Wenn das Blackboard die Basis kennt und der Agent sie noch nicht kennt,
+                # aktualisiert der Agent seine Karte.
                 elif blackboard_cell_knowledge == BASE_KNOWN and agent_current_cell_knowledge != BASE_KNOWN:
                     self.known_map[r_idx, c_idx] = BASE_KNOWN
 
         self.time_since_last_blackboard_visit = 0
         self.blackboard_visit_priority = 0
-        self.state = "SEEKING_RESOURCE"
-        self.target_pos = None
+        self.state = "SEEKING_RESOURCE"  # Setze den Status zurück auf Ressourcensuche
+        self.target_pos = None  # Setze das Ziel zurück
         self.just_synced_with_blackboard = True
 
     def _find_frontier_target(self):

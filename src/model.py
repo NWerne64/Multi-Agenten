@@ -1,7 +1,10 @@
-# src/model.py
+# In src/model.py
+
 import mesa
 from mesa.datacollection import DataCollector
 import numpy as np
+import random  # Import hinzugefügt, falls nicht vorhanden und für _get_valid_spawn_pos benötigt
+
 from src.config import (
     GRID_WIDTH, GRID_HEIGHT, NUM_AGENTS,
     NUM_WOOD_PATCHES, NUM_STONE_PATCHES,
@@ -28,7 +31,7 @@ from src.worker_agent_touring import WorkerAgent as TouringWorkerAgent
 
 class AoELiteModel(mesa.Model):
     def __init__(self,
-                 width=GRID_WIDTH, height=GRID_HEIGHT,
+                 map_dimension=None,  # <-- NEUER PARAMETER für quadratische Kartengröße
                  num_agents_val=NUM_AGENTS,
                  strategy="decentralized",
                  supervisor_type="mixed_strategy",
@@ -48,8 +51,14 @@ class AoELiteModel(mesa.Model):
         self.MIN_EXPLORE_TARGET_SEPARATION_val = min_explore_target_separation_cfg
         self.MIN_UNKNOWN_RATIO_FOR_CONTINUED_EXPLORATION_val = min_unknown_ratio_for_continued_exploration_cfg
 
-        self.grid_width_val = width
-        self.grid_height_val = height
+        # <-- ANPASSUNG: Kartengröße wird nun über map_dimension gesteuert
+        if map_dimension is not None:
+            self.grid_width_val = map_dimension
+            self.grid_height_val = map_dimension
+        else:
+            self.grid_width_val = GRID_WIDTH  # Fallback, falls map_dimension nicht übergeben wird
+            self.grid_height_val = GRID_HEIGHT  # Fallback
+
         self.num_agents_val = num_agents_val
         self.strategy = strategy
         self.supervisor_type_val = supervisor_type
@@ -59,6 +68,8 @@ class AoELiteModel(mesa.Model):
         self.num_stone_patches_val = num_stone_patches
         self.resource_goals = RESOURCE_GOALS.copy()
         self.anchor_reached_threshold_val = anchor_reached_threshold
+
+        # Sicherstellen, dass das Grid mit den angepassten Werten initialisiert wird
         self.grid = mesa.space.MultiGrid(self.grid_width_val, self.grid_height_val, torus=False)
         self.base_coords_list = []
         self.base_deposit_point = None
@@ -92,6 +103,9 @@ class AoELiteModel(mesa.Model):
         self.resources_on_grid = {}
         self._place_all_resources(self.grid_width_val, self.grid_height_val)
         self.base_resources_collected = {'wood': 0, 'stone': 0}
+
+        # NEUE ZEILE: Kommunikationszähler initialisieren
+        self.communication_counter = 0
 
         # Agenten erstellen
         if self.strategy == "supervisor":
@@ -157,10 +171,10 @@ class AoELiteModel(mesa.Model):
                 "CompletionSteps": "completion_step",
                 "CollectedWood": lambda m: m.base_resources_collected.get('wood', 0),
                 "CollectedStone": lambda m: m.base_resources_collected.get('stone', 0),
+                "TotalCommunicationEvents": "communication_counter",
             }
         )
         print(f"Modell initialisiert. Strategie: {self.strategy}, Agenten: {self.num_agents_val}")
-
 
     def _get_valid_spawn_pos(self, preferred_pos=None):
         if preferred_pos:
@@ -189,22 +203,18 @@ class AoELiteModel(mesa.Model):
                 self.random.randrange(self.grid_height_val))  # Letzter verzweifelter Versuch
 
     def submit_report_to_supervisor(self, worker_id, report_type, data):
-        # ... (Logik bleibt gleich)
         if self.strategy == "supervisor" and self.supervisor_agent_instance:
             self.supervisor_agent_instance.receive_report_from_worker(worker_id, report_type, data)
 
     def request_task_from_supervisor(self, worker_id):
-        # ... (Logik bleibt gleich)
         if self.strategy == "supervisor" and self.supervisor_agent_instance:
             return self.supervisor_agent_instance.request_task_from_worker(worker_id)
         return None
 
     def _is_cell_occupied_for_initial_placement(self, pos):
-        # ... (Logik bleibt gleich)
         return pos in self.occupied_for_initial_resource_placement
 
     def _place_base(self, grid_width, grid_height):
-        # ... (Logik bleibt gleich)
         center_x = grid_width // 2;
         center_y = grid_height // 2;
         self.base_coords_list = []
@@ -221,7 +231,6 @@ class AoELiteModel(mesa.Model):
             print("WARNUNG: Basis konnte nicht platziert werden (möglicherweise zu klein für BASE_SIZE).")
 
     def _place_blackboard_object(self, grid_width, grid_height):
-        # ... (Logik bleibt gleich)
         if not self.base_coords_list: return
         max_base_x = max(c[0] for c in self.base_coords_list)
         min_base_y_for_bb_alignment = min(
@@ -239,12 +248,10 @@ class AoELiteModel(mesa.Model):
             print("Warnung: Physisches Blackboard konnte nicht platziert werden (dezentrale Strategie).")
 
     def _place_all_resources(self, grid_width, grid_height):
-        # ... (Logik bleibt gleich)
         self._place_resource_type_clusters('wood', self.num_wood_patches_val, grid_width, grid_height)
         self._place_resource_type_clusters('stone', self.num_stone_patches_val, grid_width, grid_height)
 
     def _place_resource_type_clusters(self, resource_type, total_patches_to_place, grid_width, grid_height):
-        # ... (Logik bleibt gleich)
         patches_placed_this_type = 0;
         max_placement_attempts = 500;
         current_attempts = 0
@@ -273,6 +280,7 @@ class AoELiteModel(mesa.Model):
             idx = 0
             while cluster_generated_count < current_cluster_size and idx < len(actual_cluster_cells):
                 if patches_placed_this_type >= total_patches_to_place: break
+                if patches_placed_this_type >= total_patches_to_place: break  # Redundant, kann entfernt werden
                 parent_cell = actual_cluster_cells[idx];
                 idx += 1
                 neighbors = list(self.grid.get_neighborhood(parent_cell, moore=True, include_center=False, radius=1))
@@ -292,7 +300,6 @@ class AoELiteModel(mesa.Model):
                 f"Warnung: Nur {patches_placed_this_type}/{total_patches_to_place} {resource_type}-Patches platziert nach {current_attempts} Versuchen.")
 
     def update_blackboard_cell(self, pos, agent_reported_state):
-        # ... (Logik bleibt gleich)
         if self.strategy == "decentralized":
             x, y = pos
             if not (0 <= x < self.grid_width_val and 0 <= y < self.grid_height_val): return
@@ -310,7 +317,6 @@ class AoELiteModel(mesa.Model):
                 if current_bb_state == UNKNOWN: self.blackboard_map[x, y] = agent_reported_state; return
 
     def add_claim(self, pos, agent_id):  # Für dezentrale Strategie
-        # ... (Logik bleibt gleich)
         if self.strategy == "decentralized":
             if pos not in self.resources_on_grid:
                 if pos in self.resource_claims: del self.resource_claims[pos]
@@ -323,7 +329,6 @@ class AoELiteModel(mesa.Model):
         return False  # Nicht relevant für Supervisor-Strategie
 
     def remove_claim(self, pos, agent_id):  # Für dezentrale Strategie
-        # ... (Logik bleibt gleich)
         if self.strategy == "decentralized":
             current_claimant = self.resource_claims.get(pos)
             if current_claimant == agent_id:
@@ -333,7 +338,6 @@ class AoELiteModel(mesa.Model):
         return False
 
     def get_claimant(self, pos):  # Für dezentrale Strategie
-        # ... (Logik bleibt gleich)
         if self.strategy == "decentralized":
             return self.resource_claims.get(pos)
         return None

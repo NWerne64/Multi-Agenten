@@ -1,69 +1,71 @@
+# optimize_blackboard_interval_batch1.py
 import pandas as pd
 from mesa.batchrunner import batch_run
 from src.model import AoELiteModel
-from src.config import NUM_AGENTS
+from src.config import MIN_EXPLORE_TARGET_SEPARATION # Importieren Sie MIN_EXPLORE_TARGET_SEPARATION
 
-# ====================================================================================
-# BATCH-RUN ZUR OPTIMIERUNG DES BLACKBOARD-SYNC-INTERVALLS
-# (Angepasst an die bestehende batch_run.py Struktur)
-# ====================================================================================
 
-# 1. Definiere die Parameter für die Simulation.
-#    'batch_run' erstellt automatisch alle Kombinationen der hier definierten Parameter.
-parameters = {
+# 1. Definiere die festen und variablen Parameter für die Simulation.
+fixed_params = {
     "strategy": "decentralized",
-    "num_agents_val": NUM_AGENTS,
-    # Dieser Parameter wird variiert:
-    "blackboard_sync_interval": range(30, 151, 10) # Testet Intervalle von 30, 40, 50, ..., 150
+    "blackboard_sync_interval": 700, # Optimaler Wert aus vorheriger Analyse
+    "min_explore_target_separation_cfg": MIN_EXPLORE_TARGET_SEPARATION, # Aus config.py
+    "agent_vision_radius": 4, # Fixiert für diesen Batch
 }
 
-# 2. Führe den Batch-Lauf aus.
-if __name__ == '__main__':
-    print("Starte Batch-Lauf zur Optimierung des Blackboard-Sync-Intervalls...")
+# Variable Parameter für Batch 1: Agentenanzahl und Kartengröße
+variable_params = {
+    "num_agents_val": [4, 8, 16],
+    "map_dimension": [100], # Nur quadratische Karten
+}
 
-    # 'batch_run' führt die Simulation für jeden Wert des blackboard_sync_interval durch.
-    # Die Anzahl der 'iterations' gilt pro einzelnem Intervall-Wert.
+# 2. Führe den Batch-Run aus.
+if __name__ == '__main__':
+    print(f"Starte Batch 1: Skalierbarkeit (Agentenanzahl & Kartengröße) mit {fixed_params['blackboard_sync_interval']} Sync-Intervall und {fixed_params['agent_vision_radius']} Sichtradius...")
+
+    all_parameters = {}
+    all_parameters.update(fixed_params)
+    all_parameters.update(variable_params)
+
     results_list = batch_run(
         model_cls=AoELiteModel,
-        parameters=parameters,
-        iterations=10,  # Führe jeden Intervall-Wert 10 Mal aus
-        max_steps=4000,
-        # 'data_collection_period=-1' stellt sicher, dass nur Enddaten gesammelt werden,
-        # was bei diesem Aufbau effizienter ist. Wir brauchen nur das Endergebnis.
-        data_collection_period=-1,
+        parameters=all_parameters,
+        iterations=100, # 100 Iterationen pro Kombination
+        max_steps=5000,
         display_progress=True
     )
-    print("Batch-Lauf abgeschlossen.")
+    print("Batch 1 abgeschlossen.")
 
     # 3. Konvertiere die Ergebnisliste in einen Pandas DataFrame
     results_df = pd.DataFrame(results_list)
 
     # 4. Analysiere die Ergebnisse
-    print("\n--- Analyse der Ergebnisse ---")
+    print("\n--- Analyse Batch 1 Ergebnisse ---")
 
-    # Ersetze nicht abgeschlossene Läufe (-1) durch die maximale Schrittzahl für eine faire Analyse
-    results_df['CompletionSteps'] = results_df['CompletionSteps'].apply(lambda x: 4000 if x == -1 else x)
+    grouping_cols = list(variable_params.keys()) # ['num_agents_val', 'map_dimension']
 
-    # Gruppiere die Daten nach dem getesteten Intervall und berechne den Durchschnitt der Schritte.
-    average_completion_steps = results_df.groupby("blackboard_sync_interval")["CompletionSteps"].mean()
+    final_steps_df = results_df.loc[results_df.groupby(grouping_cols + ["RunId"])["Step"].idxmax()]
 
-    # Finde den Intervall-Wert, der im Durchschnitt die wenigsten Schritte benötigt hat.
-    if not average_completion_steps.empty:
-        best_interval = average_completion_steps.idxmin()
-        min_steps = average_completion_steps.min()
+    grouped_stats = final_steps_df.groupby(grouping_cols).apply(
+        lambda x: pd.Series({
+            'TotalRuns': len(x),
+            'SuccessfulRuns': (x['CompletionSteps'] != -1).sum(),
+            'SuccessRate': (x['CompletionSteps'] != -1).mean() * 100,
+            'AvgCompletionSteps': x[x['CompletionSteps'] != -1]['CompletionSteps'].mean(),
+            'StdCompletionSteps': x[x['CompletionSteps'] != -1]['CompletionSteps'].std(),
+            'AvgCommunicationEvents': x['TotalCommunicationEvents'].mean(),
+            'StdCommunicationEvents': x['TotalCommunicationEvents'].std(),
+        })
+    ).reset_index()
 
-        print("\nDurchschnittliche Schritte bis zur Fertigstellung pro getestetem Intervall:")
-        print(average_completion_steps)
+    grouped_stats = grouped_stats.sort_values(by=['num_agents_val', 'map_dimension'])
 
-        print("\n--- Fazit ---")
-        print(f"Der optimale Sync-Intervall ist: {best_interval} Schritte")
-        print(f"(führte zu durchschnittlich {min_steps:.0f} Schritten bis zum Ziel).")
+    print(grouped_stats.to_string())
 
-        try:
-            # Speichere die aggregierten Ergebnisse
-            average_completion_steps.to_csv("blackboard_optimization_summary.csv")
-            print("\nZusammengefasste Ergebnisse wurden in 'blackboard_optimization_summary.csv' gespeichert.")
-        except Exception as e:
-            print(f"\nFehler beim Speichern der CSV-Datei: {e}")
-    else:
-        print("Es konnten keine Ergebnisse für die Analyse gefunden werden.")
+    try:
+        grouped_stats.to_csv("batch1_scalability_summary.csv", index=False)
+        print("\nZusammengefasste Ergebnisse Batch 1 in 'batch1_scalability_summary.csv' gespeichert.")
+        results_df.to_csv("batch1_scalability_raw_results.csv", index=False)
+        print("Rohdaten Batch 1 in 'batch1_scalability_raw_results.csv' gespeichert.")
+    except Exception as e:
+        print(f"\nFehler beim Speichern der CSV-Dateien für Batch 1: {e}")
